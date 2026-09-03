@@ -48,5 +48,13 @@ class CliTests(unittest.TestCase):
         self.assertIn("Recommendation", output)
 
 
+    def test_queue_displays_a_shorter_non_repeating_queue_when_exhausted(self) -> None:
+        output = self._run("queue", "--catalog", str(self.catalog_path), "--track-id", "current", "--length", "10")
+        self.assertIn("Starting track: current", output)
+        self.assertIn("Generated 1 of 10 requested queue tracks.", output)
+        self.assertIn("match", output)
+        self.assertNotIn("disabled  [disabled]", output)
+
+
 if __name__ == "__main__":
     unittest.main()

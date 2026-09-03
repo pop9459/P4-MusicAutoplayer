@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Sequence
 
-from .predictor import rank_candidates, recommend_next_track
+from .predictor import generate_queue, rank_candidates, recommend_next_track
 from .track_analyzer import Catalog, TrackRecord, build_catalog, load_catalog, save_catalog, scan_library
 
 
@@ -116,6 +116,23 @@ def _command_recommend(args: argparse.Namespace) -> None:
     print(f"Recommendation (randomness={args.randomness:.2f}): {_format_track(recommendation)}")
 
 
+def _command_queue(args: argparse.Namespace) -> None:
+    catalog = _load_or_build_catalog(args.catalog, args.music_dir)
+    current_track = _find_track(catalog, args.track_id)
+    queue = generate_queue(
+        args.track_id,
+        catalog,
+        length=args.length,
+        top_k=args.top_k,
+        randomness=args.randomness,
+    )
+
+    print(f"Starting track: {_format_track(current_track)}")
+    print(f"Generated {len(queue)} of {args.length} requested queue tracks.")
+    for index, track in enumerate(queue, start=1):
+        print(f"{index}. {_format_track(track)}")
+
+
 def _add_catalog_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--catalog", type=Path, default=Path("data/tracks.json"), help="Path to the JSON catalog (default: data/tracks.json).")
     parser.add_argument("--music-dir", type=Path, help="Music directory to scan if the catalog does not exist.")
@@ -152,6 +169,14 @@ def build_parser() -> argparse.ArgumentParser:
     recommend.add_argument("--show-candidates", type=_positive_int, default=10, help="Number of ranked candidates to display (default: 10).")
     recommend.add_argument("--randomness", type=_randomness, default=0.0, help="Weighted random selection factor from 0.0 to 1.0 (default: 0.0).")
     recommend.set_defaults(handler=_command_recommend)
+
+    queue = subparsers.add_parser("queue", help="Generate a no-repeat recommendation queue.")
+    _add_catalog_arguments(queue)
+    queue.add_argument("--track-id", required=True, help="Starting track ID.")
+    queue.add_argument("--length", type=_positive_int, default=10, help="Number of next tracks to generate (default: 10).")
+    queue.add_argument("--top-k", type=_positive_int, default=5, help="Number of highest-ranked candidates eligible for each selection (default: 5).")
+    queue.add_argument("--randomness", type=_randomness, default=0.0, help="Weighted random selection factor from 0.0 to 1.0 (default: 0.0).")
+    queue.set_defaults(handler=_command_queue)
 
     return parser
 

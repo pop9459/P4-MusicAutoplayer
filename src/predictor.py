@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import random
 from pathlib import Path
-from typing import Sequence
+from typing import Collection, Sequence
 
 from .track_analyzer import Catalog, TrackRecord, load_catalog
 
@@ -23,6 +23,7 @@ def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
 def rank_candidates(
     current_track_id: str,
     catalog: Catalog,
+    excluded_track_ids: Collection[str] = (),
 ) -> list[tuple[TrackRecord, float]]:
     current_track = next((track for track in catalog.tracks if track.id == current_track_id), None)
     if current_track is None:
@@ -34,7 +35,7 @@ def rank_candidates(
 
     candidates: list[tuple[TrackRecord, float]] = []
     for track in catalog.tracks:
-        if not track.enabled or track.id == current_track_id:
+        if not track.enabled or track.id == current_track_id or track.id in excluded_track_ids:
             continue
         if not track.feature_vector:
             continue
@@ -78,8 +79,9 @@ def recommend_next_track(
     top_k: int = 5,
     randomness: float = 0.0,
     rng: random.Random | None = None,
+    excluded_track_ids: Collection[str] = (),
 ) -> TrackRecord:
-    ranked_candidates = rank_candidates(current_track_id, catalog)
+    ranked_candidates = rank_candidates(current_track_id, catalog, excluded_track_ids)
     if top_k > 0:
         ranked_candidates = ranked_candidates[:top_k]
     return _sample_weighted_candidates(ranked_candidates, randomness, rng or random.Random())
@@ -94,3 +96,44 @@ def recommend_next_track_from_json(
 ) -> TrackRecord:
     catalog = load_catalog(catalog_path)
     return recommend_next_track(current_track_id, catalog, top_k=top_k, randomness=randomness, rng=rng)
+
+def generate_queue(
+    current_track_id: str,
+    catalog: Catalog,
+    length: int = 10,
+    top_k: int = 5,
+    randomness: float = 0.0,
+    rng: random.Random | None = None,
+) -> list[TrackRecord]:
+    if length < 1:
+        raise ValueError("Queue length must be at least 1")
+
+    random_generator = rng or random.Random()
+    played_track_ids = {current_track_id}
+    queue: list[TrackRecord] = []
+    previous_track_id = current_track_id
+
+    for _ in range(length):
+        ranked_candidates = rank_candidates(previous_track_id, catalog, played_track_ids)
+        if top_k > 0:
+            ranked_candidates = ranked_candidates[:top_k]
+        if not ranked_candidates:
+            break
+        next_track = _sample_weighted_candidates(ranked_candidates, randomness, random_generator)
+        queue.append(next_track)
+        played_track_ids.add(next_track.id)
+        previous_track_id = next_track.id
+
+    return queue
+
+
+def generate_queue_from_json(
+    catalog_path: str | Path,
+    current_track_id: str,
+    length: int = 10,
+    top_k: int = 5,
+    randomness: float = 0.0,
+    rng: random.Random | None = None,
+) -> list[TrackRecord]:
+    catalog = load_catalog(catalog_path)
+    return generate_queue(current_track_id, catalog, length, top_k, randomness, rng)
