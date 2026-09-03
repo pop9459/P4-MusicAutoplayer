@@ -1,3 +1,4 @@
+from .mpv_backend import MpvBackend, MpvUnavailableError
 from .predictor import (
     generate_queue,
     generate_queue_from_json,

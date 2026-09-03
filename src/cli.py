@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Sequence
 
+from . import player
 from .predictor import generate_queue, rank_candidates, recommend_next_track
 from .settings import DEFAULT_SETTINGS_PATH, Settings, load_settings
 from .track_analyzer import Catalog, TrackRecord, build_catalog, load_catalog, save_catalog, scan_library
@@ -134,6 +135,19 @@ def _command_queue(args: argparse.Namespace) -> None:
         print(f"{index}. {_format_track(track)}")
 
 
+def _command_play(args: argparse.Namespace) -> None:
+    catalog = _load_or_build_catalog(args.catalog, args.music_dir)
+    exit_code = player.run(
+        catalog,
+        top_k=args.top_k,
+        randomness=args.randomness,
+        queue_length=args.length,
+        start_track_id=args.track_id,
+    )
+    if exit_code:
+        raise SystemExit(exit_code)
+
+
 def _add_catalog_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--catalog", type=Path, help="Path to the JSON catalog. Defaults to settings.json.")
     parser.add_argument("--music-dir", type=Path, help="Music directory to scan if the catalog does not exist. Defaults to settings.json.")
@@ -180,6 +194,14 @@ def build_parser() -> argparse.ArgumentParser:
     queue.add_argument("--randomness", type=_randomness, help="Weighted random selection factor from 0.0 to 1.0. Defaults to settings.json.")
     queue.set_defaults(handler=_command_queue)
 
+    play = subparsers.add_parser("play", help="Run the demo TUI player (requires mpv).")
+    _add_catalog_arguments(play)
+    play.add_argument("--track-id", help="Starting track ID. If omitted, an interactive picker is shown.")
+    play.add_argument("--top-k", type=_positive_int, help="Number of highest-ranked candidates eligible for each selection. Defaults to settings.json.")
+    play.add_argument("--randomness", type=_randomness, help="Weighted random selection factor from 0.0 to 1.0. Defaults to settings.json.")
+    play.add_argument("--length", type=_positive_int, help="Queue length to (re)generate at a time. Defaults to settings.json.")
+    play.set_defaults(handler=_command_play)
+
     return parser
 
 
@@ -203,9 +225,9 @@ def _needs_settings(args: argparse.Namespace) -> bool:
         return True
     if args.command == "build-catalog":
         return args.music_dir is None
-    if args.command in {"recommend", "queue"} and (args.top_k is None or args.randomness is None):
+    if args.command in {"recommend", "queue", "play"} and (args.top_k is None or args.randomness is None):
         return True
-    return args.command == "queue" and args.length is None
+    return args.command in {"queue", "play"} and args.length is None
 
 
 def main(argv: Sequence[str] | None = None) -> int:

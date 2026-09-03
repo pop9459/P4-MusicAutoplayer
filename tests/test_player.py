@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+import random
+import unittest
+
+from src.player import PlayerEngine, clamp_index, filter_enabled_tracks, format_track_line
+from src.track_analyzer import TrackRecord, build_catalog
+
+
+class PureHelperTests(unittest.TestCase):
+    def test_clamp_index_within_range_is_unchanged(self) -> None:
+        self.assertEqual(clamp_index(2, 5), 2)
+
+    def test_clamp_index_clamps_low_and_high(self) -> None:
+        self.assertEqual(clamp_index(-3, 5), 0)
+        self.assertEqual(clamp_index(99, 5), 4)
+
+    def test_clamp_index_empty_list_is_zero(self) -> None:
+        self.assertEqual(clamp_index(0, 0), 0)
+
+    def test_format_track_line(self) -> None:
+        track = TrackRecord(id="t", path="/music/t.mp3", title="Title", artist="Artist")
+        self.assertEqual(format_track_line(track), "Artist - Title")
+
+    def test_filter_enabled_tracks_excludes_disabled(self) -> None:
+        catalog = build_catalog([
+            TrackRecord(id="a", path="/music/a.mp3", title="A", artist="A", enabled=True),
+            TrackRecord(id="b", path="/music/b.mp3", title="B", artist="B", enabled=False),
+        ])
+        enabled = filter_enabled_tracks(catalog)
+        self.assertEqual([track.id for track in enabled], ["a"])
+
+
+class PlayerEngineTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.catalog = build_catalog([
+            TrackRecord(id="start", path="/music/start.mp3", title="Start", artist="A", genre="pop", bpm=120, year=2020),
+            TrackRecord(id="one", path="/music/one.mp3", title="One", artist="A", genre="pop", bpm=121, year=2021),
+            TrackRecord(id="two", path="/music/two.mp3", title="Two", artist="B", genre="pop", bpm=122, year=2022),
+            TrackRecord(id="three", path="/music/three.mp3", title="Three", artist="C", genre="rock", bpm=100, year=2010),
+        ])
+        self.start_track = next(track for track in self.catalog.tracks if track.id == "start")
+
+    def test_initial_queue_is_generated_on_construction(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3)
+        self.assertEqual(len(engine.queue), 3)
+        self.assertEqual(engine.current_track.id, "start")
+
+    def test_advance_pops_queue_and_updates_history(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3)
+        first_queued = engine.peek_next()
+
+        next_track = engine.advance()
+
+        self.assertIsNotNone(next_track)
+        self.assertEqual(next_track.id, first_queued.id)
+        self.assertEqual(engine.current_track.id, first_queued.id)
+        self.assertEqual([t.id for t in engine.history], ["start", first_queued.id])
+
+    def test_advance_refills_queue_when_exhausted(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3)
+        # Advance through the initial 3-item queue. Popping the last item
+        # triggers an eager refill, so queue_regenerated flips true on this
+        # final call (do not loop on `while queue`, it never empties).
+        for _ in range(2):
+            engine.advance()
+            self.assertFalse(engine.queue_regenerated)
+
+        next_track = engine.advance()
+
+        self.assertIsNotNone(next_track)
+        self.assertTrue(engine.queue_regenerated)
+        self.assertTrue(engine.queue)
+
+    def test_advance_returns_none_when_no_eligible_tracks_remain(self) -> None:
+        tiny_catalog = build_catalog([
+            TrackRecord(id="only", path="/music/only.mp3", title="Only", artist="A"),
+        ])
+        only_track = tiny_catalog.tracks[0]
+        engine = PlayerEngine(tiny_catalog, only_track, top_k=5, randomness=0.0, queue_length=3)
+
+        self.assertEqual(engine.queue, [])
+        self.assertIsNone(engine.advance())
+
+
+if __name__ == "__main__":
+    unittest.main()

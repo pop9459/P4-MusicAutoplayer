@@ -70,3 +70,28 @@ python -m src.cli summary --catalog data/tracks.json --music-dir testTracks
 ```
 
 The current scanner obtains artist and title from filenames formatted as `Artist - Title.ext`. Embedded audio-tag extraction, BPM, year, and genre enrichment are not implemented yet, so those values are usually `unknown` in a freshly scanned catalog.
+
+## Play (demo TUI)
+
+A minimal full-screen terminal player demonstrates the recommender end to end: pick a starting track, then play continuously as the recommender queues up (and, once exhausted, regenerates) the next tracks.
+
+Requires [mpv](https://mpv.io/) installed and on `PATH` (used only as a background audio backend; no mpv window/video is shown).
+
+```bash
+python -m src.cli play
+python -m src.cli play --track-id <track-id>
+python -m src.cli play --catalog data/tracks.json --length 20 --randomness 0.25
+```
+
+If `--track-id` is omitted, an interactive picker lists all enabled tracks; use the arrow keys (or `j`/`k`) and Enter to choose a starting track, or `q` to quit the picker.
+
+Keys during playback:
+
+| Key           | Action                              |
+|---------------|--------------------------------------|
+| `p` / `space` | Play / pause                        |
+| `n`           | Skip to the next queued track       |
+| `l`           | Toggle the upcoming-queue view      |
+| `q`           | Quit                                 |
+
+`--catalog`, `--music-dir`, `--top-k`, `--randomness`, and `--length` behave the same as for `recommend`/`queue`, including falling back to `settings.json` when omitted. When the queue runs out, a new one is generated automatically from the last played track and playback continues without interruption.
