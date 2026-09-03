@@ -2,6 +2,23 @@
 
 A local, offline music recommender that selects a next track using a JSON catalog and metadata-derived feature vectors.
 
+## Settings
+
+`settings.json` stores the project defaults used by the CLI:
+
+```json
+{
+  "version": 1,
+  "catalog_path": "testTracks/catalog.json",
+  "music_directory": "testTracks",
+  "top_k": 5,
+  "randomness": 0.0,
+  "queue_length": 10
+}
+```
+
+Edit these values to change normal behavior without repeatedly passing flags. Paths are resolved relative to the settings file. Use a different file with `--settings path/to/settings.json` before the command; explicit CLI flags such as `--length` and `--randomness` override settings for that one run.
+
 ## Debug CLI
 
 Run the debug utility from the repository root:

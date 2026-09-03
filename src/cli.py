@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .predictor import generate_queue, rank_candidates, recommend_next_track
+from .settings import DEFAULT_SETTINGS_PATH, Settings, load_settings
 from .track_analyzer import Catalog, TrackRecord, build_catalog, load_catalog, save_catalog, scan_library
 
 
@@ -134,17 +135,18 @@ def _command_queue(args: argparse.Namespace) -> None:
 
 
 def _add_catalog_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--catalog", type=Path, default=Path("data/tracks.json"), help="Path to the JSON catalog (default: data/tracks.json).")
-    parser.add_argument("--music-dir", type=Path, help="Music directory to scan if the catalog does not exist.")
+    parser.add_argument("--catalog", type=Path, help="Path to the JSON catalog. Defaults to settings.json.")
+    parser.add_argument("--music-dir", type=Path, help="Music directory to scan if the catalog does not exist. Defaults to settings.json.")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Inspect and debug the local music recommender.")
+    parser.add_argument("--settings", type=Path, help="Settings JSON path (default: settings.json when needed).")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     build = subparsers.add_parser("build-catalog", help="Scan a music directory and write a JSON catalog.")
-    build.add_argument("--music-dir", type=Path, required=True, help="Music directory to scan.")
-    build.add_argument("--catalog", type=Path, default=Path("data/tracks.json"), help="Output JSON catalog path.")
+    build.add_argument("--music-dir", type=Path, help="Music directory to scan. Defaults to settings.json.")
+    build.add_argument("--catalog", type=Path, help="Output JSON catalog path. Defaults to settings.json.")
     build.set_defaults(handler=_command_build_catalog)
 
     summary = subparsers.add_parser("summary", help="Show catalog and feature-space statistics.")
@@ -165,26 +167,53 @@ def build_parser() -> argparse.ArgumentParser:
     recommend = subparsers.add_parser("recommend", help="Show ranked candidates and a next-track recommendation.")
     _add_catalog_arguments(recommend)
     recommend.add_argument("--track-id", required=True, help="Current track ID.")
-    recommend.add_argument("--top-k", type=_positive_int, default=5, help="Number of highest-ranked candidates eligible for selection (default: 5).")
+    recommend.add_argument("--top-k", type=_positive_int, help="Number of highest-ranked candidates eligible for selection. Defaults to settings.json.")
     recommend.add_argument("--show-candidates", type=_positive_int, default=10, help="Number of ranked candidates to display (default: 10).")
-    recommend.add_argument("--randomness", type=_randomness, default=0.0, help="Weighted random selection factor from 0.0 to 1.0 (default: 0.0).")
+    recommend.add_argument("--randomness", type=_randomness, help="Weighted random selection factor from 0.0 to 1.0. Defaults to settings.json.")
     recommend.set_defaults(handler=_command_recommend)
 
     queue = subparsers.add_parser("queue", help="Generate a no-repeat recommendation queue.")
     _add_catalog_arguments(queue)
     queue.add_argument("--track-id", required=True, help="Starting track ID.")
-    queue.add_argument("--length", type=_positive_int, default=10, help="Number of next tracks to generate (default: 10).")
-    queue.add_argument("--top-k", type=_positive_int, default=5, help="Number of highest-ranked candidates eligible for each selection (default: 5).")
-    queue.add_argument("--randomness", type=_randomness, default=0.0, help="Weighted random selection factor from 0.0 to 1.0 (default: 0.0).")
+    queue.add_argument("--length", type=_positive_int, help="Number of next tracks to generate. Defaults to settings.json.")
+    queue.add_argument("--top-k", type=_positive_int, help="Number of highest-ranked candidates eligible for each selection. Defaults to settings.json.")
+    queue.add_argument("--randomness", type=_randomness, help="Weighted random selection factor from 0.0 to 1.0. Defaults to settings.json.")
     queue.set_defaults(handler=_command_queue)
 
     return parser
+
+
+def _apply_settings_defaults(args: argparse.Namespace, settings: Settings) -> None:
+    if args.catalog is None:
+        args.catalog = settings.catalog_path
+    if args.music_dir is None:
+        args.music_dir = settings.music_directory
+    if hasattr(args, "top_k") and args.top_k is None:
+        args.top_k = settings.top_k
+    if hasattr(args, "randomness") and args.randomness is None:
+        args.randomness = settings.randomness
+    if hasattr(args, "length") and args.length is None:
+        args.length = settings.queue_length
+
+
+def _needs_settings(args: argparse.Namespace) -> bool:
+    if args.catalog is None:
+        return True
+    if not args.catalog.exists() and args.music_dir is None:
+        return True
+    if args.command == "build-catalog":
+        return args.music_dir is None
+    if args.command in {"recommend", "queue"} and (args.top_k is None or args.randomness is None):
+        return True
+    return args.command == "queue" and args.length is None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if _needs_settings(args):
+            _apply_settings_defaults(args, load_settings(args.settings or DEFAULT_SETTINGS_PATH))
         handler: Callable[[argparse.Namespace], None] = args.handler
         handler(args)
     except (FileNotFoundError, ValueError) as error:
