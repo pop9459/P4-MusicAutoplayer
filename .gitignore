@@ -1,3 +1,11 @@
+# Local music libraries and their generated catalogs.
 testTracks/*
-testTracks/readme.txt
-.github
+!testTracks/readme.txt
+**/catalog.json
+
+# Generated Python bytecode.
+__pycache__/
+*.py[cod]
+
+# Local Copilot configuration.
+.github/
