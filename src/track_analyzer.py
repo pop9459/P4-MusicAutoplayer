@@ -36,6 +36,42 @@ def _scale_block(values: list[float], weight: float) -> list[float]:
     return [value * scale for value in values]
 
 
+def _normalize_vector_l2(values: list[float]) -> list[float]:
+    magnitude = math.sqrt(sum(value * value for value in values))
+    if magnitude == 0.0:
+        return values
+    return [value / magnitude for value in values]
+
+
+# Hand-authored similarity between related genre families (symmetric,
+# unordered pairs; unlisted pairs default to 0.0 = unrelated). A one-hot
+# genre match/mismatch treats rock-vs-metal identically to rock-vs-classical
+# ("different" either way), so recommendations can't bridge closely related
+# genres. This table lets the genre block carry a soft distance instead of
+# a hard boundary. Deliberately conservative/sparse: only clearly adjacent
+# families are listed, and "unknown" is intentionally absent so untagged
+# tracks aren't pulled toward anything.
+_GENRE_ADJACENCY: dict[tuple[str, str], float] = {
+    ("rock", "metal"): 0.5,
+    ("rock", "pop"): 0.2,
+    ("rock", "folk"): 0.2,
+    ("rock", "country"): 0.2,
+    ("pop", "electronic"): 0.3,
+    ("pop", "r&b"): 0.3,
+    ("hip-hop", "r&b"): 0.4,
+    ("hip-hop", "electronic"): 0.2,
+    ("reggae", "latin"): 0.2,
+    ("folk", "country"): 0.3,
+    ("jazz", "classical"): 0.2,
+}
+
+
+def _genre_similarity(a: str, b: str) -> float:
+    if a == b:
+        return 1.0
+    return _GENRE_ADJACENCY.get((a, b), _GENRE_ADJACENCY.get((b, a), 0.0))
+
+
 def _normalize_text(value: str | None, default: str = "") -> str:
     if not value:
         return default
@@ -351,7 +387,7 @@ def _build_feature_vector(
 ) -> list[float]:
     genre = canonicalize_genre(track.genre)
     artist = _canonicalize_artist(track.artist)
-    genre_vector = [1.0 if genre == value else 0.0 for value in genres]
+    genre_vector = _normalize_vector_l2([_genre_similarity(genre, value) for value in genres])
     artist_vector = [1.0 if artist == value else 0.0 for value in artists]
     bpm_value = [_normalize_numeric(track.bpm, bpm_min, bpm_max)]
     year_value = [_normalize_numeric(track.year, year_min, year_max)]

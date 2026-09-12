@@ -7,11 +7,12 @@ import math
 import unittest
 from unittest.mock import patch
 
-from src.predictor import rank_candidates
+from src.predictor import cosine_similarity, rank_candidates
 from src.track_analyzer import (
     FEATURE_WEIGHTS,
     TrackRecord,
     _build_feature_vector,
+    _genre_similarity,
     _parse_bpm_from_tag,
     _parse_year_from_tag,
     _read_tag_metadata,
@@ -181,6 +182,47 @@ class FeatureVectorWeightingTests(unittest.TestCase):
         # candidate (not scored at 0), proving genre contributes.
         same_genre_score = next(score for track, score in ranked if track.id == "same_genre")
         self.assertGreater(same_genre_score, 0.0)
+
+
+class GenreAdjacencyTests(unittest.TestCase):
+    def test_exact_match_scores_one(self) -> None:
+        self.assertEqual(_genre_similarity("rock", "rock"), 1.0)
+
+    def test_adjacent_pair_is_symmetric_and_nonzero(self) -> None:
+        self.assertEqual(_genre_similarity("rock", "metal"), _genre_similarity("metal", "rock"))
+        self.assertGreater(_genre_similarity("rock", "metal"), 0.0)
+
+    def test_unrelated_pair_scores_zero(self) -> None:
+        self.assertEqual(_genre_similarity("rock", "classical"), 0.0)
+
+    def test_unknown_has_no_adjacency(self) -> None:
+        self.assertEqual(_genre_similarity("unknown", "rock"), 0.0)
+        self.assertEqual(_genre_similarity("unknown", "pop"), 0.0)
+
+    def test_adjacent_genre_ranks_above_unrelated_genre(self) -> None:
+        catalog = build_catalog([
+            TrackRecord(id="start", path="/start.mp3", title="Start", artist="A", genre="rock", bpm=120, year=2000),
+            TrackRecord(id="metal_track", path="/m.mp3", title="Metal", artist="B", genre="metal", bpm=120, year=2000),
+            TrackRecord(id="classical_track", path="/c.mp3", title="Classical", artist="C", genre="classical", bpm=120, year=2000),
+        ])
+        ranked = rank_candidates("start", catalog)
+        ranked_ids = [track.id for track, _ in ranked]
+
+        self.assertLess(ranked_ids.index("metal_track"), ranked_ids.index("classical_track"))
+        classical_score = next(score for track, score in ranked if track.id == "classical_track")
+        self.assertAlmostEqual(classical_score, 0.0)
+
+    def test_exact_genre_match_similarity_is_unchanged_by_adjacency_table(self) -> None:
+        # Two same-genre/same-everything-else tracks should still score a
+        # perfect match, same as under the old one-hot encoding: adjacency
+        # only matters when genres differ.
+        catalog = build_catalog([
+            TrackRecord(id="start", path="/start.mp3", title="Start", artist="A", genre="rock", bpm=120, year=2000),
+            TrackRecord(id="match", path="/match.mp3", title="Match", artist="A", genre="rock", bpm=120, year=2000),
+        ])
+        start_vector = next(t for t in catalog.tracks if t.id == "start").feature_vector
+        match_vector = next(t for t in catalog.tracks if t.id == "match").feature_vector
+        self.assertAlmostEqual(cosine_similarity(start_vector, match_vector), 1.0)
 
 
 if __name__ == "__main__":
