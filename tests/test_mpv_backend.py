@@ -97,6 +97,26 @@ class MpvBackendIpcTests(unittest.TestCase):
         with patch.object(backend, "get_property", side_effect=[False, "/music/track.mp3"]):
             self.assertFalse(backend.is_finished())
 
+    def test_get_time_pos_returns_float_value(self) -> None:
+        backend, _ = _make_backend({})
+        with patch.object(backend, "get_property", return_value=61.5):
+            self.assertEqual(backend.get_time_pos(), 61.5)
+
+    def test_get_time_pos_returns_none_when_unavailable(self) -> None:
+        backend, _ = _make_backend({})
+        with patch.object(backend, "get_property", return_value=None):
+            self.assertIsNone(backend.get_time_pos())
+
+    def test_get_duration_returns_float_value(self) -> None:
+        backend, _ = _make_backend({})
+        with patch.object(backend, "get_property", return_value=180):
+            self.assertEqual(backend.get_duration(), 180.0)
+
+    def test_get_duration_returns_none_when_unavailable(self) -> None:
+        backend, _ = _make_backend({})
+        with patch.object(backend, "get_property", return_value=None):
+            self.assertIsNone(backend.get_duration())
+
     def test_shutdown_sends_quit_and_terminates_process(self) -> None:
         backend, fake_socket = _make_backend({})
         with patch("pathlib.Path.unlink") as mock_unlink:

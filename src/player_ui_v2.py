@@ -210,12 +210,18 @@ class Player3Column:
         else:
             return self.handle_queue_input(key)
 
+    def _refresh_progress(self) -> None:
+        """Poll the backend for the current playback position/duration."""
+        if self.engine:
+            self.player_bar.update_progress(self.backend.get_time_pos(), self.backend.get_duration())
+
     def run_loop(self, stdscr: curses._CursesWindow) -> None:
         """Main event loop."""
         stdscr.timeout(POLL_INTERVAL_MS)
 
         while True:
             # Render all panels
+            self._refresh_progress()
             self._render_layout(stdscr)
 
             # Handle input or auto-advance
@@ -240,8 +246,8 @@ class Player3Column:
         col_width_songs = (width * 2) // 5
         col_width_queue = width - col_width_folders - col_width_songs
 
-        # Player bar takes bottom 2 lines
-        content_height = height - 3
+        # Player bar takes bottom 3 lines: state/track, progress bar, status
+        content_height = height - 4
 
         # Render folders
         self._render_folders(stdscr, 0, 0, col_width_folders, content_height)
@@ -258,7 +264,7 @@ class Player3Column:
             stdscr.addch(y, col_width_folders + col_width_songs, curses.ACS_VLINE)
 
         # Player bar
-        self._render_player_bar(stdscr, height - 2, width)
+        self._render_player_bar(stdscr, height - 3, width)
 
         stdscr.refresh()
 
@@ -303,18 +309,30 @@ class Player3Column:
             stdscr.addnstr(row, col, line.ljust(width - 1), width - 1, attr)
             row += 1
 
+    @staticmethod
+    def _centered(text: str, width: int) -> str:
+        """Pad `text` with leading spaces to center it within `width` columns."""
+        text = text[:width]
+        padding = max(0, (width - len(text)) // 2)
+        return " " * padding + text
+
     def _render_player_bar(self, stdscr: curses._CursesWindow, row: int, width: int) -> None:
-        """Render bottom player bar."""
+        """Render bottom player bar: state/track/controls, then a progress bar."""
         state = self.player_bar.get_state_display()
         track_display = self.player_bar.get_track_display()
         controls = "[Space]Play/Pause  [N]ext  [R]andom  [Q]uit"
 
         bar_attr = curses.color_pair(COLOR_PLAYER_BAR) if self._has_colors else curses.A_REVERSE
-        line = f"[{state}] {track_display} | {controls}"[:width - 1]
-        stdscr.addnstr(row, 0, line.ljust(width - 1), width - 1, bar_attr)
+        info_line = self._centered(f"[{state}] {track_display} | {controls}", width - 1)
+        stdscr.addnstr(row, 0, info_line.ljust(width - 1), width - 1, bar_attr)
+
+        progress_attr = curses.color_pair(COLOR_PROGRESS) if self._has_colors else curses.A_NORMAL
+        progress_line = self._centered(self.player_bar.get_progress_display(), width - 1)
+        stdscr.addnstr(row + 1, 0, progress_line.ljust(width - 1), width - 1, progress_attr)
 
         if self.player_bar.status_message:
-            stdscr.addnstr(row + 1, 0, self.player_bar.status_message.ljust(width - 1)[:width - 1], width - 1, curses.A_DIM)
+            status_line = self._centered(self.player_bar.status_message, width - 1)
+            stdscr.addnstr(row + 2, 0, status_line.ljust(width - 1), width - 1, curses.A_DIM)
 
 
 def run(

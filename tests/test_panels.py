@@ -180,6 +180,46 @@ class PlayerBarTests(unittest.TestCase):
         display = bar.get_state_display()
         self.assertIn("PLAYING", display)
 
+    def test_get_progress_display_with_no_track(self) -> None:
+        bar = PlayerBar()
+        display = bar.get_progress_display()
+        self.assertIn("--:--", display)
+
+    def test_get_progress_display_at_start(self) -> None:
+        bar = PlayerBar()
+        bar.update_progress(0.0, 180.0)
+        display = bar.get_progress_display()
+        self.assertIn("0:00", display)
+        self.assertIn("3:00", display)
+
+    def test_get_progress_display_midway(self) -> None:
+        bar = PlayerBar()
+        bar.update_progress(90.0, 180.0)
+        display = bar.get_progress_display(bar_width=10)
+        self.assertIn("1:30", display)
+        self.assertIn("3:00", display)
+        self.assertIn("=", display)
+
+    def test_get_progress_display_at_end(self) -> None:
+        bar = PlayerBar()
+        bar.update_progress(180.0, 180.0)
+        display = bar.get_progress_display(bar_width=10)
+        self.assertIn("3:00", display)
+        self.assertNotIn("-", display.split("]")[0])
+
+    def test_get_progress_display_with_zero_duration_is_safe(self) -> None:
+        bar = PlayerBar()
+        bar.update_progress(0.0, 0.0)
+        display = bar.get_progress_display()
+        self.assertIn("--:--", display)
+
+    def test_update_track_resets_progress(self) -> None:
+        bar = PlayerBar()
+        bar.update_progress(90.0, 180.0)
+        bar.update_track(self.track)
+        self.assertIsNone(bar.time_pos)
+        self.assertIsNone(bar.duration)
+
 
 if __name__ == "__main__":
     unittest.main()

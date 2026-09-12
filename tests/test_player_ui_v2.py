@@ -293,5 +293,51 @@ class ColorAndFocusTests(unittest.TestCase):
         self.assertNotEqual(focused_attrs, unfocused_attrs)
 
 
+class ProgressBarTests(unittest.TestCase):
+    """Issue #5: time progress bar and centered player controls."""
+
+    def setUp(self) -> None:
+        self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.settings = load_settings()
+        self.backend = MagicMock(spec=MpvBackend)
+
+    def test_refresh_progress_updates_player_bar_from_backend(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        self.backend.get_time_pos.return_value = 61.0
+        self.backend.get_duration.return_value = 180.0
+
+        player._refresh_progress()
+
+        self.assertEqual(player.player_bar.time_pos, 61.0)
+        self.assertEqual(player.player_bar.duration, 180.0)
+
+    def test_refresh_progress_noop_without_engine(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        player.engine = None
+
+        player._refresh_progress()
+
+        self.backend.get_time_pos.assert_not_called()
+
+    def test_render_player_bar_lines_are_centered(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        # Use a short track name so the info line is well short of the
+        # terminal width and centering padding is guaranteed non-zero.
+        player.player_bar.update_track(self.catalog.tracks[0])
+        player.player_bar.current_track.title = "X"
+        player.player_bar.update_progress(30.0, 120.0)
+        stdscr = FakeStdscr(width=80)
+
+        player._render_player_bar(stdscr, row=10, width=80)
+
+        info_row, _col, info_text, _attr = stdscr.calls[0]
+        self.assertTrue(info_text.startswith(" "))
+        progress_row, _col, progress_text, _attr = stdscr.calls[1]
+        self.assertEqual(progress_row, info_row + 1)
+        self.assertTrue(progress_text.startswith(" "))
+        self.assertIn("0:30", progress_text)
+        self.assertIn("2:00", progress_text)
+
+
 if __name__ == "__main__":
     unittest.main()

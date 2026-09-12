@@ -130,6 +130,16 @@ class MpvBackend:
             return response.get("data")
         return default
 
+    def get_time_pos(self) -> float | None:
+        """Current playback position in seconds, or None if unavailable."""
+        value = self.get_property("time-pos", default=None)
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def get_duration(self) -> float | None:
+        """Duration of the loaded file in seconds, or None if unavailable."""
+        value = self.get_property("duration", default=None)
+        return float(value) if isinstance(value, (int, float)) else None
+
     def is_finished(self) -> bool:
         """True once the currently loaded file has finished playing (idle, not paused-at-start)."""
         if self._process.poll() is not None:
