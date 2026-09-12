@@ -139,7 +139,7 @@ def _command_queue(args: argparse.Namespace) -> None:
 
 def _command_play(args: argparse.Namespace, settings: Settings) -> None:
     catalog = _load_or_build_catalog(args.catalog, args.music_dir)
-    exit_code = player_ui_v2.run(catalog, settings)
+    exit_code = player_ui_v2.run(catalog, settings, args.settings or DEFAULT_SETTINGS_PATH)
     if exit_code:
         raise SystemExit(exit_code)
 

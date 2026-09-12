@@ -11,9 +11,11 @@ from .player import PlayerEngine, filter_enabled_tracks
 from .player_bar import PlayerBar
 from .predictor import generate_queue
 from .queue_panel import QueuePanel
-from .settings import Settings, load_settings
+from .settings import DEFAULT_SETTINGS_PATH, Settings, load_settings, save_settings
+from .settings_panel import FIELDS as SETTINGS_FIELDS
+from .settings_panel import SettingsPanel
 from .songs_panel import SongsPanel
-from .track_analyzer import Catalog, TrackRecord
+from .track_analyzer import Catalog, TrackRecord, load_catalog
 
 POLL_INTERVAL_MS = 200
 
@@ -36,18 +38,23 @@ class Player3Column:
         catalog: Catalog,
         settings: Settings,
         backend: MpvBackend,
+        *,
+        settings_path: Path = DEFAULT_SETTINGS_PATH,
     ) -> None:
         self.catalog = catalog
         self.settings = settings
+        self.settings_path = settings_path
         self.backend = backend
 
         self.folder_panel = FolderPanel()
         self.songs_panel = SongsPanel()
         self.queue_panel = QueuePanel()
         self.player_bar = PlayerBar()
+        self.settings_panel = SettingsPanel()
 
         self.engine: PlayerEngine | None = None
         self.active_column = 0  # 0=folders, 1=songs, 2=queue
+        self.mode = "player"  # "player" | "settings"
 
         self._colors_ready = False
         self._has_colors = False
@@ -158,6 +165,8 @@ class Player3Column:
         elif key in (ord("\n"), ord(" ")):
             if self.songs_panel.songs:
                 self._play_selected_song()
+        elif key in (ord("s"), ord("S")):
+            self._enter_settings_mode()
 
         return True
 
@@ -180,6 +189,8 @@ class Player3Column:
             self._play_random_song()
         elif key in (ord("\n"),):
             self._play_selected_song()
+        elif key in (ord("s"), ord("S")):
+            self._enter_settings_mode()
 
         return True
 
@@ -198,17 +209,80 @@ class Player3Column:
         elif key in (ord("p"), ord("P")) or key == ord(" "):
             if self.engine:
                 self.player_bar.set_paused(self.backend.toggle_pause())
+        elif key in (ord("s"), ord("S")):
+            self._enter_settings_mode()
 
         return True
 
+    def _enter_settings_mode(self) -> None:
+        """Open the settings screen, loading a fresh editable copy of settings."""
+        self.settings_panel.load_from_settings(self.settings)
+        self.mode = "settings"
+
     def handle_input(self, key: int) -> bool:
-        """Dispatch key to active column. Return False to quit."""
+        """Dispatch key to active column, or to the settings screen if open.
+        Return False to quit."""
+        if self.mode == "settings":
+            return self.handle_settings_input(key)
         if self.active_column == 0:
             return self.handle_folder_input(key)
         elif self.active_column == 1:
             return self.handle_songs_input(key)
         else:
             return self.handle_queue_input(key)
+
+    def handle_settings_input(self, key: int) -> bool:
+        """Handle input while the settings screen is open. Return False to quit."""
+        if key in (ord("q"), ord("Q")):
+            return False
+        elif key == 27:  # Esc: discard edits, return to the player screen
+            self.settings_panel.cancel_text_edit()
+            self.mode = "player"
+        elif key == curses.KEY_DOWN or key == ord("j"):
+            self.settings_panel.next_field()
+        elif key == curses.KEY_UP or key == ord("k"):
+            self.settings_panel.previous_field()
+        elif key in (curses.KEY_RIGHT, ord("+"), ord("l")):
+            self.settings_panel.increment()
+        elif key in (curses.KEY_LEFT, ord("-"), ord("h")):
+            self.settings_panel.decrement()
+        elif key == ord("\n"):
+            self.settings_panel.begin_text_edit()
+        elif key in (ord("a"), ord("A")):
+            self._apply_settings()
+
+        return True
+
+    def _apply_settings(self) -> None:
+        """Persist the edited settings, then live-reapply them."""
+        new_settings = self.settings_panel.to_settings()
+        try:
+            save_settings(new_settings, self.settings_path)
+        except OSError as error:
+            self.settings_panel.status_message = f"Save failed: {error}"
+            return
+
+        catalog_changed = new_settings.catalog_path != self.settings.catalog_path
+        self.settings = new_settings
+
+        if catalog_changed:
+            try:
+                self.catalog = load_catalog(self.settings.catalog_path)
+            except (OSError, ValueError) as error:
+                self.settings_panel.status_message = f"Catalog reload failed: {error}"
+
+        self.folder_panel.load_folders_from_settings(self.settings)
+        if self.folder_panel.selected_folder:
+            self.songs_panel.load_songs_from_catalog(self.catalog)
+
+        current_track = self.engine.current_track if self.engine else None
+        if current_track is None and self.songs_panel.songs:
+            current_track = self.songs_panel.songs[0]
+        if current_track is not None:
+            self._init_engine_with_song(current_track)
+
+        self.player_bar.set_status("Settings applied.")
+        self.mode = "player"
 
     def _refresh_progress(self) -> None:
         """Poll the backend for the current playback position/duration."""
@@ -233,6 +307,32 @@ class Player3Column:
                 if not self.handle_input(key):
                     return
 
+            if self.settings_panel.editing_text:
+                self._edit_text_field(stdscr)
+
+    def _edit_text_field(self, stdscr: curses._CursesWindow) -> None:
+        """Synchronously prompt for a new value for the field currently being
+        text-edited (only src/settings_panel.py's `catalog_path` today).
+        Needs `stdscr` directly (curses.echo()/getstr()), which is why this
+        lives in run_loop's caller rather than handle_settings_input."""
+        height, width = stdscr.getmaxyx()
+        prompt = f"New {self.settings_panel.current_field()}: "
+        stdscr.addnstr(height - 1, 0, prompt.ljust(width - 1), width - 1, curses.A_REVERSE)
+        stdscr.refresh()
+
+        curses.echo()
+        curses.curs_set(1)
+        stdscr.timeout(-1)
+        try:
+            raw = stdscr.getstr(height - 1, len(prompt), width - len(prompt) - 1)
+            value = raw.decode("utf-8", errors="replace")
+        finally:
+            curses.noecho()
+            curses.curs_set(0)
+            stdscr.timeout(POLL_INTERVAL_MS)
+
+        self.settings_panel.apply_text_edit(value)
+
     def _render_layout(self, stdscr: curses._CursesWindow) -> None:
         """Render full 3-column layout."""
         if not self._colors_ready:
@@ -240,6 +340,11 @@ class Player3Column:
 
         stdscr.erase()
         height, width = stdscr.getmaxyx()
+
+        if self.mode == "settings":
+            self._render_settings(stdscr, height, width)
+            stdscr.refresh()
+            return
 
         # Columns: 20% folders, 40% songs, 40% queue
         col_width_folders = width // 5
@@ -334,10 +439,42 @@ class Player3Column:
             status_line = self._centered(self.player_bar.status_message, width - 1)
             stdscr.addnstr(row + 2, 0, status_line.ljust(width - 1), width - 1, curses.A_DIM)
 
+    def _render_settings(self, stdscr: curses._CursesWindow, height: int, width: int) -> None:
+        """Full-screen settings editor, replacing the 3-column layout."""
+        panel = self.settings_panel
+        stdscr.addnstr(0, 0, "Settings".ljust(width - 1), width - 1, curses.A_BOLD)
+
+        values = {
+            "top_k": str(panel.top_k),
+            "randomness": f"{panel.randomness:.2f}",
+            "queue_length": str(panel.queue_length),
+            "catalog_path": str(panel.catalog_path),
+        }
+        row = 2
+        for index, field_name in enumerate(SETTINGS_FIELDS):
+            attr = self._cursor_attr(0) if index == panel.field_index else curses.A_NORMAL
+            line = f"{field_name}: {values[field_name]}"
+            stdscr.addnstr(row, 2, line.ljust(width - 3)[:width - 3], width - 3, attr)
+            row += 1
+
+        row += 1
+        if len(panel.music_folders) > 1:
+            folders = ", ".join(str(folder) for folder in panel.music_folders)
+            stdscr.addnstr(row, 2, f"music_folders (read-only): {folders}"[:width - 3], width - 3, curses.A_DIM)
+            row += 2
+
+        if panel.status_message:
+            stdscr.addnstr(row, 2, panel.status_message[:width - 3], width - 3, curses.A_DIM)
+            row += 1
+
+        hint = "[Up/Down] Move  [+/-] Adjust  [Enter] Edit  [A] Apply&Save  [Esc] Cancel"
+        stdscr.addnstr(height - 1, 0, hint.ljust(width - 1)[:width - 1], width - 1, curses.A_DIM)
+
 
 def run(
     catalog: Catalog,
     settings: Settings,
+    settings_path: Path = DEFAULT_SETTINGS_PATH,
 ) -> int:
     """Entry point for 3-column player."""
     try:
@@ -348,7 +485,7 @@ def run(
 
     try:
         def _main(stdscr: curses._CursesWindow) -> None:
-            player = Player3Column(catalog, settings, backend)
+            player = Player3Column(catalog, settings, backend, settings_path=settings_path)
             player.run_loop(stdscr)
 
         curses.wrapper(_main)

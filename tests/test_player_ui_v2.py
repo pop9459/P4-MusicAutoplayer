@@ -339,5 +339,89 @@ class ProgressBarTests(unittest.TestCase):
         self.assertIn("2:00", progress_text)
 
 
+class SettingsModeTests(unittest.TestCase):
+    """Issue #3: in-TUI settings screen."""
+
+    def setUp(self) -> None:
+        self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.settings = load_settings()
+        self.backend = MagicMock(spec=MpvBackend)
+
+    def test_backward_compatible_construction_without_settings_path(self) -> None:
+        # Locks in that settings_path stays optional/keyword-only so every
+        # pre-existing 3-positional-argument call site keeps working.
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        self.assertEqual(player.mode, "player")
+
+    def test_s_key_opens_settings_from_each_column(self) -> None:
+        for column, handler_name in ((0, "handle_folder_input"), (1, "handle_songs_input"), (2, "handle_queue_input")):
+            with self.subTest(column=column):
+                player = Player3Column(self.catalog, self.settings, self.backend)
+                player.active_column = column
+                handler = getattr(player, handler_name)
+                result = handler(ord("s"))
+                self.assertTrue(result)
+                self.assertEqual(player.mode, "settings")
+                self.assertEqual(player.settings_panel.top_k, self.settings.top_k)
+
+    def test_settings_navigation_moves_field_index(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        player._enter_settings_mode()
+
+        player.handle_settings_input(curses.KEY_DOWN)
+        self.assertEqual(player.settings_panel.field_index, 1)
+        player.handle_settings_input(curses.KEY_UP)
+        self.assertEqual(player.settings_panel.field_index, 0)
+
+    def test_settings_increment_adjusts_top_k(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        player._enter_settings_mode()
+        initial = player.settings_panel.top_k
+
+        player.handle_settings_input(ord("+"))
+
+        self.assertEqual(player.settings_panel.top_k, initial + 1)
+
+    def test_escape_cancels_without_saving(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        player._enter_settings_mode()
+        player.handle_settings_input(ord("+"))
+
+        with patch("src.player_ui_v2.save_settings") as mock_save:
+            player.handle_settings_input(27)
+
+        mock_save.assert_not_called()
+        self.assertEqual(player.mode, "player")
+
+    def test_apply_saves_settings_and_returns_to_player_mode(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        player._enter_settings_mode()
+        player.handle_settings_input(ord("+"))  # top_k += 1
+        expected = player.settings_panel.to_settings()
+
+        with patch("src.player_ui_v2.save_settings") as mock_save:
+            player.handle_settings_input(ord("a"))
+
+        mock_save.assert_called_once_with(expected, player.settings_path)
+        self.assertEqual(player.mode, "player")
+        self.assertEqual(player.settings.top_k, expected.top_k)
+
+    def test_quit_from_settings_mode_returns_false(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        player._enter_settings_mode()
+        self.assertFalse(player.handle_input(ord("q")))
+
+    def test_render_settings_does_not_raise_and_shows_all_fields(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        player._enter_settings_mode()
+        stdscr = FakeStdscr(height=24, width=80)
+
+        player._render_settings(stdscr, height=24, width=80)
+
+        rendered = " ".join(text for _r, _c, text, _a in stdscr.calls)
+        for field_name in ("top_k", "randomness", "queue_length", "catalog_path"):
+            self.assertIn(field_name, rendered)
+
+
 if __name__ == "__main__":
     unittest.main()
