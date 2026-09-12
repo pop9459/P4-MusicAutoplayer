@@ -20,6 +20,28 @@ def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
     return dot_product / (left_norm * right_norm)
 
 
+def _blend_vectors(primary: Sequence[float], secondary: Sequence[float], primary_weight: float) -> list[float]:
+    return [primary_weight * a + (1.0 - primary_weight) * b for a, b in zip(primary, secondary)]
+
+
+def rank_candidates_by_vector(
+    reference_vector: Sequence[float],
+    catalog: Catalog,
+    exclude_track_ids: Collection[str] = (),
+) -> list[tuple[TrackRecord, float]]:
+    candidates: list[tuple[TrackRecord, float]] = []
+    for track in catalog.tracks:
+        if not track.enabled or track.id in exclude_track_ids:
+            continue
+        if not track.feature_vector:
+            continue
+        similarity = cosine_similarity(reference_vector, track.feature_vector)
+        candidates.append((track, similarity))
+
+    candidates.sort(key=lambda item: item[1], reverse=True)
+    return candidates
+
+
 def rank_candidates(
     current_track_id: str,
     catalog: Catalog,
@@ -33,17 +55,7 @@ def rank_candidates(
     if not current_vector:
         raise ValueError(f"Track has no feature vector: {current_track_id}")
 
-    candidates: list[tuple[TrackRecord, float]] = []
-    for track in catalog.tracks:
-        if not track.enabled or track.id == current_track_id or track.id in excluded_track_ids:
-            continue
-        if not track.feature_vector:
-            continue
-        similarity = cosine_similarity(current_vector, track.feature_vector)
-        candidates.append((track, similarity))
-
-    candidates.sort(key=lambda item: item[1], reverse=True)
-    return candidates
+    return rank_candidates_by_vector(current_vector, catalog, {current_track_id, *excluded_track_ids})
 
 
 def _sample_weighted_candidates(
@@ -97,6 +109,15 @@ def recommend_next_track_from_json(
     catalog = load_catalog(catalog_path)
     return recommend_next_track(current_track_id, catalog, top_k=top_k, randomness=randomness, rng=rng)
 
+# Fraction of each ranking step's reference vector drawn from the original
+# seed track rather than the previously picked track. Chaining purely off
+# the last pick lets small similarity drifts compound step over step, so a
+# long queue can end up sounding nothing like what the user started with;
+# anchoring part of each step to the seed keeps the whole queue in its
+# neighborhood while still allowing gradual progression.
+SEED_ANCHOR_WEIGHT = 0.3
+
+
 def generate_queue(
     current_track_id: str,
     catalog: Catalog,
@@ -108,13 +129,21 @@ def generate_queue(
     if length < 1:
         raise ValueError("Queue length must be at least 1")
 
+    seed_track = next((track for track in catalog.tracks if track.id == current_track_id), None)
+    if seed_track is None:
+        raise ValueError(f"Track not found in catalog: {current_track_id}")
+    seed_vector = seed_track.feature_vector
+    if not seed_vector:
+        raise ValueError(f"Track has no feature vector: {current_track_id}")
+
     random_generator = rng or random.Random()
     played_track_ids = {current_track_id}
     queue: list[TrackRecord] = []
-    previous_track_id = current_track_id
+    previous_vector = seed_vector
 
     for _ in range(length):
-        ranked_candidates = rank_candidates(previous_track_id, catalog, played_track_ids)
+        reference_vector = _blend_vectors(previous_vector, seed_vector, 1.0 - SEED_ANCHOR_WEIGHT)
+        ranked_candidates = rank_candidates_by_vector(reference_vector, catalog, played_track_ids)
         if top_k > 0:
             ranked_candidates = ranked_candidates[:top_k]
         if not ranked_candidates:
@@ -122,7 +151,7 @@ def generate_queue(
         next_track = _sample_weighted_candidates(ranked_candidates, randomness, random_generator)
         queue.append(next_track)
         played_track_ids.add(next_track.id)
-        previous_track_id = next_track.id
+        previous_vector = next_track.feature_vector
 
     return queue
 

@@ -141,6 +141,26 @@ class FeatureVectorWeightingTests(unittest.TestCase):
         self.assertAlmostEqual(vector[4], 0.5 * bpm_scale)  # (120-100)/(140-100) = 0.5
         self.assertAlmostEqual(vector[5], 1.0 * year_scale)  # (2020-2000)/(2020-2000) = 1.0
 
+    def test_bpm_outlier_does_not_stretch_normalization_for_the_rest_of_the_library(self) -> None:
+        # One badly-tagged 300 BPM track shouldn't compress every normal
+        # track's bpm block into a narrow band near 0.
+        tracks = [
+            TrackRecord(id=f"t{i}", path=f"/{i}.mp3", title=str(i), artist="X", genre="rock", bpm=100 + i, year=2000)
+            for i in range(20)
+        ]
+        tracks.append(
+            TrackRecord(id="outlier", path="/o.mp3", title="Outlier", artist="X", genre="rock", bpm=300, year=2000)
+        )
+        catalog = build_catalog(tracks)
+
+        bpm_scale = math.sqrt(FEATURE_WEIGHTS["bpm"])
+        normalized_bpm_values = [
+            track.feature_vector[-2] / bpm_scale for track in catalog.tracks if track.id != "outlier"
+        ]
+        # Without clipping, normal tracks would all land under ~0.1 on a
+        # 100-300 scale. With percentile clipping they should spread out.
+        self.assertGreater(max(normalized_bpm_values) - min(normalized_bpm_values), 0.5)
+
     def test_same_genre_different_artist_scores_lower_than_same_artist_same_genre(self) -> None:
         # Same-artist/same-genre pair should score at or above a
         # different-artist/same-genre pair once bpm/year introduce real

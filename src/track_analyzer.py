@@ -261,7 +261,42 @@ def _normalize_numeric(value: float | int | None, minimum: float | int | None, m
         return 0.0
     if maximum == minimum:
         return 0.0
-    return (float(value) - float(minimum)) / (float(maximum) - float(minimum))
+    clipped_value = max(float(minimum), min(float(maximum), float(value)))
+    return (clipped_value - float(minimum)) / (float(maximum) - float(minimum))
+
+
+def _percentile(sorted_values: list[float], fraction: float) -> float:
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    position = (len(sorted_values) - 1) * fraction
+    lower_index = math.floor(position)
+    upper_index = math.ceil(position)
+    if lower_index == upper_index:
+        return sorted_values[int(position)]
+    lower_weight = upper_index - position
+    upper_weight = position - lower_index
+    return sorted_values[lower_index] * lower_weight + sorted_values[upper_index] * upper_weight
+
+
+# A single mistagged/outlier BPM value (e.g. a corrupt ID3 tag) would
+# otherwise stretch bpm_min/bpm_max across the whole library, compressing
+# every other track's normalized BPM into a narrow band. Clipping to the
+# 5th-95th percentile keeps the scale representative of the bulk of the
+# library; _normalize_numeric then clips each track's own value into
+# [bpm_min, bpm_max] so true outliers just saturate at 0.0/1.0 instead of
+# distorting everyone else.
+_BPM_OUTLIER_PERCENTILE = 0.05
+
+
+def _bpm_bounds(bpm_values: list[float]) -> tuple[float | None, float | None]:
+    if not bpm_values:
+        return None, None
+    sorted_values = sorted(bpm_values)
+    bpm_min = _percentile(sorted_values, _BPM_OUTLIER_PERCENTILE)
+    bpm_max = _percentile(sorted_values, 1.0 - _BPM_OUTLIER_PERCENTILE)
+    if bpm_max <= bpm_min:
+        return sorted_values[0], sorted_values[-1]
+    return bpm_min, bpm_max
 
 
 def scan_library(root: str | Path) -> list[TrackRecord]:
@@ -298,8 +333,7 @@ def _build_feature_space(tracks: Iterable[TrackRecord]) -> tuple[list[str], list
     bpm_values = [track.bpm for track in tracks if track.bpm is not None]
     year_values = [track.year for track in tracks if track.year is not None]
 
-    bpm_min = min(bpm_values) if bpm_values else None
-    bpm_max = max(bpm_values) if bpm_values else None
+    bpm_min, bpm_max = _bpm_bounds(bpm_values)
     year_min = min(year_values) if year_values else None
     year_max = max(year_values) if year_values else None
 

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import math
 import random
 import unittest
+from unittest.mock import patch
 
-from src.predictor import generate_queue
-from src.track_analyzer import TrackRecord, build_catalog
+import src.predictor as predictor_module
+from src.predictor import cosine_similarity, generate_queue
+from src.track_analyzer import Catalog, TrackRecord, build_catalog
 
 
 class QueueGenerationTests(unittest.TestCase):
@@ -31,6 +34,40 @@ class QueueGenerationTests(unittest.TestCase):
 
         self.assertEqual(len(queue), 3)
         self.assertEqual({track.id for track in queue}, {"one", "two", "three"})
+
+
+class QueueSeedAnchoringTests(unittest.TestCase):
+    def test_anchoring_prefers_a_pick_closer_to_the_seed_over_continued_drift(self) -> None:
+        # Synthetic 2D feature vectors (angles on the unit circle) built to
+        # demonstrate seed anchoring: at step 2, ranking purely off the
+        # previously picked track ("c1") favors continuing to drift further
+        # away ("c2"), while blending in the original seed pulls the pick
+        # back toward a track ("D") that is actually more similar to the
+        # seed the user started from.
+        def vec(degrees: float) -> list[float]:
+            radians = math.radians(degrees)
+            return [math.cos(radians), math.sin(radians)]
+
+        def mk(track_id: str, degrees: float) -> TrackRecord:
+            return TrackRecord(id=track_id, path=f"/{track_id}.mp3", title=track_id, feature_vector=vec(degrees))
+
+        tracks = [mk("seed", 0), mk("c1", 15), mk("c2", 50), mk("D", -25)]
+        catalog = Catalog(
+            version=1, tracks=tracks, genres=[], artists=[],
+            bpm_min=None, bpm_max=None, year_min=None, year_max=None,
+        )
+
+        anchored_queue = generate_queue("seed", catalog, length=2, top_k=1, randomness=0.0)
+        with patch.object(predictor_module, "SEED_ANCHOR_WEIGHT", 0.0):
+            unanchored_queue = generate_queue("seed", catalog, length=2, top_k=1, randomness=0.0)
+
+        seed_vector = vec(0)
+        anchored_final_similarity = cosine_similarity(seed_vector, anchored_queue[-1].feature_vector)
+        unanchored_final_similarity = cosine_similarity(seed_vector, unanchored_queue[-1].feature_vector)
+
+        self.assertEqual([t.id for t in unanchored_queue], ["c1", "c2"])
+        self.assertEqual([t.id for t in anchored_queue], ["c1", "D"])
+        self.assertGreater(anchored_final_similarity, unanchored_final_similarity)
 
 
 if __name__ == "__main__":
