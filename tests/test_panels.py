@@ -4,83 +4,126 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from src.folder_panel import FolderPanel
+from src.folder_panel import FolderEntry, FolderPanel
+from src.library import ALL_TRACKS_FOLDER_ID, Library, LibraryFolder
 from src.player_bar import PlayerBar
 from src.queue_panel import QueuePanel
 from src.settings import Settings, load_settings
 from src.songs_panel import SongsPanel
-from src.track_analyzer import Catalog, TrackRecord, load_catalog
+from src.track_analyzer import Catalog, TrackRecord, build_catalog, load_catalog
 
 
 DEFAULT_SETTINGS = load_settings()
 
 
-class FolderPanelTests(unittest.TestCase):
-    def test_load_folders_from_settings(self) -> None:
-        panel = FolderPanel()
-        panel.load_folders_from_settings(DEFAULT_SETTINGS)
-        self.assertTrue(len(panel.folders) > 0)
+def _make_library() -> Library:
+    """Two folders: 'a' (2 tracks) and 'b' (1 track, 1 disabled)."""
+    tracks = [
+        TrackRecord(id="a1", path="/music/a/1.mp3", title="A1", artist="Artist A", folder_id="folder-a"),
+        TrackRecord(id="a2", path="/music/a/2.mp3", title="A2", artist="Artist A", folder_id="folder-a"),
+        TrackRecord(id="b1", path="/music/b/1.mp3", title="B1", artist="Artist B", folder_id="folder-b"),
+        TrackRecord(id="b2", path="/music/b/2.mp3", title="B2", artist="Artist B", folder_id="folder-b", enabled=False),
+    ]
+    catalog = build_catalog(tracks)
+    folders = [
+        LibraryFolder(id="folder-a", path="/music/a", display_name="a", added_at="t", last_scanned_at="t", track_count=2),
+        LibraryFolder(id="folder-b", path="/music/b", display_name="b", added_at="t", last_scanned_at="t", track_count=2),
+    ]
+    return Library(version=1, folders=folders, catalog=catalog)
 
-    def test_selected_folder_is_first_by_default(self) -> None:
+
+class FolderPanelTests(unittest.TestCase):
+    def test_load_from_library_includes_all_tracks_entry_first(self) -> None:
         panel = FolderPanel()
-        panel.load_folders_from_settings(DEFAULT_SETTINGS)
+        panel.load_from_library(_make_library())
+        self.assertEqual(panel.entries[0].id, ALL_TRACKS_FOLDER_ID)
+        self.assertEqual(panel.entries[0].track_count, 4)
+        self.assertEqual([entry.id for entry in panel.entries[1:]], ["folder-a", "folder-b"])
+
+    def test_selected_folder_is_all_tracks_by_default(self) -> None:
+        panel = FolderPanel()
+        panel.load_from_library(_make_library())
         self.assertEqual(panel.selected_index, 0)
-        self.assertIsNotNone(panel.selected_folder)
+        self.assertEqual(panel.selected_entry.id, ALL_TRACKS_FOLDER_ID)
 
     def test_next_folder_increments_index(self) -> None:
         panel = FolderPanel()
-        panel.load_folders_from_settings(DEFAULT_SETTINGS)
-        if len(panel.folders) > 1:
-            initial_idx = panel.selected_index
-            panel.next_folder()
-            self.assertGreater(panel.selected_index, initial_idx)
+        panel.load_from_library(_make_library())
+        initial_idx = panel.selected_index
+        panel.next_folder()
+        self.assertGreater(panel.selected_index, initial_idx)
 
     def test_previous_folder_decrements_index(self) -> None:
         panel = FolderPanel()
-        panel.load_folders_from_settings(DEFAULT_SETTINGS)
-        if len(panel.folders) > 1:
-            panel.next_folder()
-            panel.previous_folder()
-            self.assertEqual(panel.selected_index, 0)
+        panel.load_from_library(_make_library())
+        panel.next_folder()
+        panel.previous_folder()
+        self.assertEqual(panel.selected_index, 0)
 
 
 class SongsPanelTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.catalog = load_catalog(Path("testTracks/catalog.json"))
+        cls.library = _make_library()
 
-    def test_load_songs_from_catalog(self) -> None:
+    def _all_tracks_entry(self) -> FolderEntry:
+        return FolderEntry(id=ALL_TRACKS_FOLDER_ID, display_name="All Tracks", path=None, track_count=4)
+
+    def _folder_a_entry(self) -> FolderEntry:
+        return FolderEntry(id="folder-a", display_name="a", path="/music/a", track_count=2)
+
+    def _folder_b_entry(self) -> FolderEntry:
+        return FolderEntry(id="folder-b", display_name="b", path="/music/b", track_count=2)
+
+    def test_load_songs_from_library_all_tracks_excludes_disabled(self) -> None:
         panel = SongsPanel()
-        panel.load_songs_from_catalog(self.catalog)
-        self.assertTrue(len(panel.songs) > 0)
+        panel.load_songs_from_library(self.library, self._all_tracks_entry())
+        self.assertEqual(len(panel.songs), 3)
         for track in panel.songs:
             self.assertTrue(track.enabled)
 
+    def test_load_songs_from_library_filters_by_folder(self) -> None:
+        panel = SongsPanel()
+        panel.load_songs_from_library(self.library, self._folder_a_entry())
+        self.assertEqual([track.id for track in panel.songs], ["a1", "a2"])
+
+    def test_load_songs_from_library_excludes_disabled_within_folder(self) -> None:
+        panel = SongsPanel()
+        panel.load_songs_from_library(self.library, self._folder_b_entry())
+        self.assertEqual([track.id for track in panel.songs], ["b1"])
+
+    def test_switching_folder_changes_song_list(self) -> None:
+        """Regression test: folder selection must actually filter songs."""
+        panel = SongsPanel()
+        panel.load_songs_from_library(self.library, self._folder_a_entry())
+        songs_for_a = [track.id for track in panel.songs]
+        panel.load_songs_from_library(self.library, self._folder_b_entry())
+        songs_for_b = [track.id for track in panel.songs]
+        self.assertNotEqual(songs_for_a, songs_for_b)
+
     def test_selected_song_is_first_by_default(self) -> None:
         panel = SongsPanel()
-        panel.load_songs_from_catalog(self.catalog)
+        panel.load_songs_from_library(self.library, self._all_tracks_entry())
         self.assertEqual(panel.selected_index, 0)
         self.assertIsNotNone(panel.selected_song)
         self.assertEqual(panel.selected_song, panel.songs[0])
 
     def test_next_song_increments_index(self) -> None:
         panel = SongsPanel()
-        panel.load_songs_from_catalog(self.catalog)
-        if len(panel.songs) > 1:
-            panel.next_song()
-            self.assertEqual(panel.selected_index, 1)
+        panel.load_songs_from_library(self.library, self._all_tracks_entry())
+        panel.next_song()
+        self.assertEqual(panel.selected_index, 1)
 
     def test_previous_song_decrements_index(self) -> None:
         panel = SongsPanel()
-        panel.load_songs_from_catalog(self.catalog)
-        if len(panel.songs) > 1:
-            panel.next_song()
-            panel.previous_song()
-            self.assertEqual(panel.selected_index, 0)
+        panel.load_songs_from_library(self.library, self._all_tracks_entry())
+        panel.next_song()
+        panel.previous_song()
+        self.assertEqual(panel.selected_index, 0)
 
     def test_get_visible_songs_returns_tuples(self) -> None:
         panel = SongsPanel()
-        panel.load_songs_from_catalog(self.catalog)
+        panel.load_songs_from_library(self.library, self._all_tracks_entry())
         visible = list(panel.get_visible_songs(10))
         self.assertTrue(len(visible) > 0)
         for track, idx, is_selected in visible:

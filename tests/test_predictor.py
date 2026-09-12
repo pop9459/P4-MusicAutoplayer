@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import src.predictor as predictor_module
-from src.predictor import cosine_similarity, generate_queue
+from src.predictor import cosine_similarity, generate_queue, generate_queue_steps, rank_candidates_by_vector
 from src.track_analyzer import Catalog, TrackRecord, build_catalog
 
 
@@ -34,6 +34,23 @@ class QueueGenerationTests(unittest.TestCase):
 
         self.assertEqual(len(queue), 3)
         self.assertEqual({track.id for track in queue}, {"one", "two", "three"})
+
+    def test_generate_queue_matches_generate_queue_steps(self) -> None:
+        queue = generate_queue("start", self.catalog, length=3, randomness=0.0, rng=random.Random(1))
+        steps = list(generate_queue_steps("start", self.catalog, length=3, randomness=0.0, rng=random.Random(1)))
+
+        self.assertEqual([t.id for t in queue], [t.id for t in steps])
+
+    def test_generate_queue_steps_yields_incrementally(self) -> None:
+        steps = generate_queue_steps("start", self.catalog, length=3, randomness=0.0)
+
+        first = next(steps)
+
+        self.assertIsInstance(first, TrackRecord)
+        # Exhausting only one step must not have run the whole loop yet --
+        # the remaining picks are still available from the same generator.
+        remaining = list(steps)
+        self.assertEqual(len(remaining), 2)
 
 
 class QueueSeedAnchoringTests(unittest.TestCase):
@@ -119,6 +136,82 @@ class ArtistRepeatCapTests(unittest.TestCase):
         # artist with the current streak.
         queue = generate_queue("solo0", single_artist_catalog, length=4, top_k=10, randomness=0.0)
         self.assertEqual(len(queue), 4)
+
+
+class TrackNormCachingTests(unittest.TestCase):
+    """`build_catalog` precomputes `Catalog.track_norms` so
+    `rank_candidates_by_vector` doesn't recompute each track's feature-vector
+    norm on every ranking call. This must not change ranking results."""
+
+    def setUp(self) -> None:
+        self.catalog = build_catalog([
+            TrackRecord(id="start", path="/music/start.mp3", title="Start", artist="A", genre="pop", bpm=120, year=2020),
+            TrackRecord(id="one", path="/music/one.mp3", title="One", artist="A", genre="pop", bpm=121, year=2021),
+            TrackRecord(id="two", path="/music/two.mp3", title="Two", artist="B", genre="pop", bpm=122, year=2022),
+            TrackRecord(id="three", path="/music/three.mp3", title="Three", artist="C", genre="rock", bpm=100, year=2010),
+        ])
+
+    def test_build_catalog_populates_track_norms_for_every_track(self) -> None:
+        for track in self.catalog.tracks:
+            self.assertIn(track.id, self.catalog.track_norms)
+            expected = math.sqrt(sum(v * v for v in track.feature_vector))
+            self.assertAlmostEqual(self.catalog.track_norms[track.id], expected)
+
+    def test_ranking_matches_naive_cosine_similarity(self) -> None:
+        seed = next(t for t in self.catalog.tracks if t.id == "start")
+
+        ranked = rank_candidates_by_vector(seed.feature_vector, self.catalog, {"start"})
+        naive = sorted(
+            (
+                (track, cosine_similarity(seed.feature_vector, track.feature_vector))
+                for track in self.catalog.tracks
+                if track.id != "start"
+            ),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+
+        self.assertEqual([t.id for t, _ in ranked], [t.id for t, _ in naive])
+        for (_, ranked_score), (_, naive_score) in zip(ranked, naive):
+            self.assertAlmostEqual(ranked_score, naive_score)
+
+    def test_ranking_falls_back_gracefully_when_track_norms_missing(self) -> None:
+        seed = next(t for t in self.catalog.tracks if t.id == "start")
+        catalog_without_cache = Catalog(
+            version=self.catalog.version,
+            tracks=self.catalog.tracks,
+            genres=self.catalog.genres,
+            artists=self.catalog.artists,
+            bpm_min=self.catalog.bpm_min,
+            bpm_max=self.catalog.bpm_max,
+            year_min=self.catalog.year_min,
+            year_max=self.catalog.year_max,
+        )
+
+        ranked_with_cache = rank_candidates_by_vector(seed.feature_vector, self.catalog, {"start"})
+        ranked_without_cache = rank_candidates_by_vector(seed.feature_vector, catalog_without_cache, {"start"})
+
+        self.assertEqual([t.id for t, _ in ranked_with_cache], [t.id for t, _ in ranked_without_cache])
+
+
+class IntentionalPerfectMatchTests(unittest.TestCase):
+    """A track sharing both genre and artist with the reference track scores
+    a perfect (1.0) cosine match -- CLAUDE.md calls this intentional and
+    mathematically unavoidable given the weighted feature space, not a bug.
+    This pins that behavior so it isn't "fixed" by a future scoring change;
+    repetitive queues are meant to be addressed via top_k/randomness/the
+    artist-repeat cap, not by altering similarity scoring."""
+
+    def test_same_genre_and_artist_scores_perfect_similarity(self) -> None:
+        catalog = build_catalog([
+            TrackRecord(id="a1", path="/a1.mp3", title="A1", artist="Same Artist", genre="pop", bpm=120, year=2020),
+            TrackRecord(id="a2", path="/a2.mp3", title="A2", artist="Same Artist", genre="pop", bpm=120, year=2020),
+            TrackRecord(id="b1", path="/b1.mp3", title="B1", artist="Other Artist", genre="rock", bpm=90, year=1995),
+        ])
+        a1 = next(t for t in catalog.tracks if t.id == "a1")
+        a2 = next(t for t in catalog.tracks if t.id == "a2")
+
+        self.assertAlmostEqual(cosine_similarity(a1.feature_vector, a2.feature_vector), 1.0)
 
 
 if __name__ == "__main__":

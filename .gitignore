@@ -3,6 +3,9 @@ testTracks/*
 !testTracks/readme.txt
 **/catalog.json
 
+# Central library database (tracked folders + merged catalog).
+data/library.json
+
 # Generated Python bytecode.
 __pycache__/
 *.py[cod]

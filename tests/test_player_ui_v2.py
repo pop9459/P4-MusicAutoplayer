@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import curses
+import dataclasses
 import re
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.folder_panel import FolderPanel
+from src.library import Library, LibraryFolder
 from src.mpv_backend import MpvBackend
 from src.player import PlayerEngine
 from src.player_bar import PlayerBar
-from src.player_ui_v2 import Player3Column
+from src.player_ui_v2 import MIN_QUEUE_LENGTH, Player3Column
 from src.queue_panel import QueuePanel
 from src.settings import load_settings
 from src.songs_panel import SongsPanel
@@ -20,52 +22,66 @@ from src.track_analyzer import load_catalog
 from tests.curses_stub import FakeStdscr
 
 
+
+def _library_from_catalog(catalog):
+    """Wrap a loaded testTracks catalog in a single-folder Library, mutating
+    folder_id in place so `catalog` and `library.catalog` stay the same
+    object (tests that mutate self.catalog.tracks afterward rely on this)."""
+    for track in catalog.tracks:
+        track.folder_id = "testtracks"
+    folder = LibraryFolder(
+        id="testtracks", path="testTracks", display_name="testTracks",
+        added_at="t", last_scanned_at="t", track_count=len(catalog.tracks),
+    )
+    return Library(version=1, folders=[folder], catalog=catalog)
+
 class Player3ColumnIntegrationTests(unittest.TestCase):
     """Full workflow: folder selection → song selection → playback → queue."""
 
     def setUp(self) -> None:
         self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.library = _library_from_catalog(self.catalog)
         self.settings = load_settings()
         self.backend = MagicMock(spec=MpvBackend)
 
     def test_player_initializes_with_catalog_and_settings(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         self.assertIsNotNone(player.folder_panel)
         self.assertIsNotNone(player.songs_panel)
         self.assertIsNotNone(player.queue_panel)
         self.assertIsNotNone(player.player_bar)
 
     def test_folder_panel_loads_on_init(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
-        self.assertTrue(len(player.folder_panel.folders) > 0)
+        player = Player3Column(self.library, self.settings, self.backend)
+        self.assertTrue(len(player.folder_panel.entries) > 0)
         self.assertEqual(player.folder_panel.selected_index, 0)
 
     def test_songs_load_on_init(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         # Should auto-load songs from first folder
         self.assertTrue(len(player.songs_panel.songs) > 0)
 
     def test_engine_initializes_with_first_song(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         self.assertIsNotNone(player.engine)
         self.assertIsNotNone(player.engine.current_track)
         self.backend.load_file.assert_called()
 
     def test_play_selected_song_initializes_playback(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         initial_track = player.songs_panel.selected_song
         player._play_selected_song()
         self.assertEqual(player.player_bar.current_track, initial_track)
         self.backend.load_file.assert_called_with(initial_track.path)
 
     def test_play_random_song_picks_from_enabled(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player._play_random_song()
         self.assertIsNotNone(player.player_bar.current_track)
         self.assertTrue(player.player_bar.current_track.enabled)
 
     def test_advance_track_moves_to_next(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         initial_track = player.engine.current_track
         player._advance_track()
         # Current track should change, and queue should stay topped up
@@ -74,48 +90,48 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
         self.assertEqual(len(player.engine.queue), player.settings.queue_length)
 
     def test_folder_selection_loads_new_songs(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         initial_songs = player.songs_panel.songs[:]
-        if len(player.folder_panel.folders) > 1:
+        if len(player.folder_panel.entries) > 1:
             player.folder_panel.next_folder()
-            player.songs_panel.load_songs_from_catalog(self.catalog)
+            player.songs_panel.load_songs_from_library(self.library, player.folder_panel.selected_entry)
             # Songs may be same if folder contains same files, but panel should refresh
 
     def test_handle_folder_input_navigates(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
-        if len(player.folder_panel.folders) > 1:
+        player = Player3Column(self.library, self.settings, self.backend)
+        if len(player.folder_panel.entries) > 1:
             player.active_column = 0
             result = player.handle_folder_input(ord("j"))
             self.assertTrue(result)  # Should not quit
             self.assertGreater(player.folder_panel.selected_index, 0)
 
     def test_handle_folder_input_quit_returns_false(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         result = player.handle_folder_input(ord("q"))
         self.assertFalse(result)
 
     def test_handle_songs_input_plays_selected(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player.active_column = 1
         initial_track = player.songs_panel.selected_song
         player.handle_songs_input(ord("\n"))
         self.assertEqual(player.player_bar.current_track, initial_track)
 
     def test_handle_songs_input_random(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player.active_column = 1
         player.handle_songs_input(ord("r"))
         self.assertIsNotNone(player.player_bar.current_track)
 
     def test_handle_songs_input_next_track(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player.active_column = 1
         initial_queue_len = len(player.engine.queue) if player.engine else 0
         player.handle_songs_input(ord("n"))
         # Queue should advance
 
     def test_handle_queue_input_scrolls(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player.active_column = 2
         initial_offset = player.queue_panel.scroll_offset
         player.handle_queue_input(ord("j"))
@@ -123,25 +139,94 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
         self.assertGreaterEqual(player.queue_panel.scroll_offset, 0)
 
     def test_queue_updates_on_playback(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         initial_queue = player.queue_panel.queue[:]
         player._advance_track()
         # Queue should update
         self.assertIsNotNone(player.queue_panel.queue)
 
     def test_player_bar_reflects_current_state(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         self.assertIsNotNone(player.player_bar.current_track)
         display = player.player_bar.get_track_display()
         self.assertIn(player.player_bar.current_track.title, display)
 
     def test_status_messages_update(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player.player_bar.set_status("Test message")
         self.assertEqual(player.player_bar.status_message, "Test message")
         player._play_random_song()
         # Should update status
         self.assertNotEqual(player.player_bar.status_message, "Test message")
+
+    def test_playback_starts_before_queue_generation_completes(self) -> None:
+        """`_init_engine_with_song` must call `backend.load_file` before
+        queue generation runs, so a slow full-catalog scan on a large
+        library doesn't delay when audio starts."""
+        player = Player3Column(self.library, self.settings, self.backend)
+        call_order: list[str] = []
+        self.backend.load_file.side_effect = lambda path: call_order.append("load_file")
+
+        with patch("src.player.generate_queue_steps", side_effect=lambda *a, **k: call_order.append("generate_queue_steps") or iter([])):
+            player._play_selected_song()
+
+        self.assertEqual(call_order, ["load_file", "generate_queue_steps"])
+
+    def test_advance_track_starts_playback_before_topping_up_queue(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        call_order: list[str] = []
+        self.backend.load_file.side_effect = lambda path: call_order.append("load_file")
+
+        filler_track = self.catalog.tracks[0]
+        with patch("src.player.recommend_next_track", side_effect=lambda *a, **k: call_order.append("recommend_next_track") or filler_track):
+            player._advance_track()
+
+        self.assertEqual(call_order[0], "load_file")
+        self.assertIn("recommend_next_track", call_order)
+
+    def test_queue_reveals_one_track_at_a_time(self) -> None:
+        """`_init_engine_with_song` should redraw after each track is added
+        to the queue, not just once at the end, so the queue column visibly
+        fills in track by track."""
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._stdscr = FakeStdscr(height=24, width=80)
+        player._colors_ready = True
+
+        with patch("src.player_ui_v2.QUEUE_REVEAL_DELAY_S", 0.0), patch("curses.ACS_VLINE", ord("|"), create=True):
+            queue_lengths_seen = []
+            original_update_queue = player.queue_panel.update_queue
+
+            def _tracking_update_queue(queue):
+                original_update_queue(queue)
+                queue_lengths_seen.append(len(queue))
+
+            player.queue_panel.update_queue = _tracking_update_queue
+            player._play_selected_song()
+
+        self.assertGreater(len(queue_lengths_seen), 1)
+        self.assertEqual(queue_lengths_seen, sorted(queue_lengths_seen))
+        self.assertEqual(queue_lengths_seen[-1], len(player.engine.queue))
+
+    def test_effective_queue_length_uses_terminal_height(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.settings = dataclasses.replace(player.settings, queue_length=1)
+        player._term_height = 40  # visible rows = 40 - 6 = 34
+
+        self.assertEqual(player._effective_queue_length(), 34)
+
+    def test_effective_queue_length_floors_at_minimum_of_ten(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._term_height = 10  # visible rows = max(0, 10-6) = 4
+        player.settings = dataclasses.replace(player.settings, queue_length=1)
+
+        self.assertEqual(player._effective_queue_length(), MIN_QUEUE_LENGTH)
+
+    def test_effective_queue_length_respects_configured_setting_as_floor(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._term_height = 10  # visible rows = max(0, 10-6) = 4
+        player.settings = dataclasses.replace(player.settings, queue_length=15)
+
+        self.assertEqual(player._effective_queue_length(), 15)
 
 
 class WorkflowIntegrationTests(unittest.TestCase):
@@ -149,18 +234,19 @@ class WorkflowIntegrationTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.library = _library_from_catalog(self.catalog)
         self.settings = load_settings()
         self.backend = MagicMock(spec=MpvBackend)
 
     def test_startup_loads_defaults(self) -> None:
         """Startup should load default folder and songs."""
-        player = Player3Column(self.catalog, self.settings, self.backend)
-        self.assertTrue(len(player.folder_panel.folders) > 0)
+        player = Player3Column(self.library, self.settings, self.backend)
+        self.assertTrue(len(player.folder_panel.entries) > 0)
         self.assertTrue(len(player.songs_panel.songs) > 0)
 
     def test_full_playback_sequence(self) -> None:
         """Sequence: play song → advance track → play random."""
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         track1 = player.songs_panel.selected_song
 
         # Play selected
@@ -187,17 +273,18 @@ class ColumnDividerOverlapTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.library = _library_from_catalog(self.catalog)
         self.settings = load_settings()
         self.backend = MagicMock(spec=MpvBackend)
 
     def test_full_layout_does_not_clip_songs_or_queue_first_character(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         # Give every track a distinctive, non-space first character so a
         # clipped column would be immediately detectable.
         for track in self.catalog.tracks:
             track.artist = "ZEBRA"
             track.title = "Track"
-        player.songs_panel.load_songs_from_catalog(self.catalog)
+        player.songs_panel.load_songs_from_library(self.library, player.folder_panel.selected_entry)
         player.queue_panel.update_queue(self.catalog.tracks[:3])
         # Skip real color/ACS init (both require initscr()); irrelevant here.
         player._colors_ready = True
@@ -218,11 +305,12 @@ class QueueRenderTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.library = _library_from_catalog(self.catalog)
         self.settings = load_settings()
         self.backend = MagicMock(spec=MpvBackend)
 
     def test_render_queue_has_no_numeric_prefix(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player.queue_panel.update_queue(self.catalog.tracks[:5])
         stdscr = FakeStdscr()
 
@@ -239,11 +327,12 @@ class SongsRenderTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.library = _library_from_catalog(self.catalog)
         self.settings = load_settings()
         self.backend = MagicMock(spec=MpvBackend)
 
     def test_random_row_stays_fixed_regardless_of_scroll(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         # Force a song list long enough to fill the visible column.
         player.songs_panel.songs = list(self.catalog.tracks) * 3
         player.songs_panel.selected_index = 0
@@ -258,7 +347,7 @@ class SongsRenderTests(unittest.TestCase):
         row_scrolled = next(row for row, _col, text, _attr in stdscr.calls if "[R] Play Random" in text)
 
         self.assertEqual(row_no_scroll, row_scrolled)
-        self.assertEqual(row_no_scroll, 1)  # directly under the "Songs" header
+        self.assertEqual(row_no_scroll, 3)  # below the name/path/count header rows
 
 
 class ColorAndFocusTests(unittest.TestCase):
@@ -266,6 +355,7 @@ class ColorAndFocusTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.library = _library_from_catalog(self.catalog)
         self.settings = load_settings()
         self.backend = MagicMock(spec=MpvBackend)
 
@@ -273,11 +363,11 @@ class ColorAndFocusTests(unittest.TestCase):
         # curses.start_color()/init_pair() require a live curses screen, and
         # Player3Column is constructed directly (no curses.wrapper) in every
         # other test here, so color setup must stay lazy.
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         self.assertFalse(player._colors_ready)
 
     def test_cursor_attr_without_color_support_falls_back_to_legacy_attrs(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         with patch("curses.has_colors", return_value=False):
             player._init_colors()
 
@@ -300,7 +390,7 @@ class ColorAndFocusTests(unittest.TestCase):
         player._init_colors()
 
     def test_focused_and_unfocused_cursor_attrs_differ(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         self._init_colors_without_real_screen(player)
 
         player.active_column = 0
@@ -309,9 +399,9 @@ class ColorAndFocusTests(unittest.TestCase):
         self.assertNotEqual(focused_attr, unfocused_attr)
 
     def test_render_folders_highlights_selected_row_only_when_focused(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         self._init_colors_without_real_screen(player)
-        if len(player.folder_panel.folders) < 1:
+        if len(player.folder_panel.entries) < 1:
             self.skipTest("no folders in test catalog")
 
         player.active_column = 0
@@ -332,11 +422,12 @@ class ProgressBarTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.library = _library_from_catalog(self.catalog)
         self.settings = load_settings()
         self.backend = MagicMock(spec=MpvBackend)
 
     def test_refresh_progress_updates_player_bar_from_backend(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         self.backend.get_time_pos.return_value = 61.0
         self.backend.get_duration.return_value = 180.0
 
@@ -346,7 +437,7 @@ class ProgressBarTests(unittest.TestCase):
         self.assertEqual(player.player_bar.duration, 180.0)
 
     def test_refresh_progress_noop_without_engine(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player.engine = None
 
         player._refresh_progress()
@@ -354,7 +445,7 @@ class ProgressBarTests(unittest.TestCase):
         self.backend.get_time_pos.assert_not_called()
 
     def test_render_player_bar_lines_are_centered(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         # Use a short track name so the info line is well short of the
         # terminal width and centering padding is guaranteed non-zero.
         player.player_bar.update_track(self.catalog.tracks[0])
@@ -378,19 +469,20 @@ class SettingsModeTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.library = _library_from_catalog(self.catalog)
         self.settings = load_settings()
         self.backend = MagicMock(spec=MpvBackend)
 
     def test_backward_compatible_construction_without_settings_path(self) -> None:
         # Locks in that settings_path stays optional/keyword-only so every
         # pre-existing 3-positional-argument call site keeps working.
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         self.assertEqual(player.mode, "player")
 
     def test_s_key_opens_settings_from_each_column(self) -> None:
         for column, handler_name in ((0, "handle_folder_input"), (1, "handle_songs_input"), (2, "handle_queue_input")):
             with self.subTest(column=column):
-                player = Player3Column(self.catalog, self.settings, self.backend)
+                player = Player3Column(self.library, self.settings, self.backend)
                 player.active_column = column
                 handler = getattr(player, handler_name)
                 result = handler(ord("s"))
@@ -399,7 +491,7 @@ class SettingsModeTests(unittest.TestCase):
                 self.assertEqual(player.settings_panel.top_k, self.settings.top_k)
 
     def test_settings_navigation_moves_field_index(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player._enter_settings_mode()
 
         player.handle_settings_input(curses.KEY_DOWN)
@@ -408,7 +500,7 @@ class SettingsModeTests(unittest.TestCase):
         self.assertEqual(player.settings_panel.field_index, 0)
 
     def test_settings_increment_adjusts_top_k(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player._enter_settings_mode()
         initial = player.settings_panel.top_k
 
@@ -417,7 +509,7 @@ class SettingsModeTests(unittest.TestCase):
         self.assertEqual(player.settings_panel.top_k, initial + 1)
 
     def test_escape_cancels_without_saving(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player._enter_settings_mode()
         player.handle_settings_input(ord("+"))
 
@@ -428,7 +520,7 @@ class SettingsModeTests(unittest.TestCase):
         self.assertEqual(player.mode, "player")
 
     def test_apply_saves_settings_and_returns_to_player_mode(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player._enter_settings_mode()
         player.handle_settings_input(ord("+"))  # top_k += 1
         expected = player.settings_panel.to_settings()
@@ -441,19 +533,19 @@ class SettingsModeTests(unittest.TestCase):
         self.assertEqual(player.settings.top_k, expected.top_k)
 
     def test_quit_from_settings_mode_returns_false(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player._enter_settings_mode()
         self.assertFalse(player.handle_input(ord("q")))
 
     def test_render_settings_does_not_raise_and_shows_all_fields(self) -> None:
-        player = Player3Column(self.catalog, self.settings, self.backend)
+        player = Player3Column(self.library, self.settings, self.backend)
         player._enter_settings_mode()
         stdscr = FakeStdscr(height=24, width=80)
 
         player._render_settings(stdscr, height=24, width=80)
 
         rendered = " ".join(text for _r, _c, text, _a in stdscr.calls)
-        for field_name in ("top_k", "randomness", "queue_length", "catalog_path"):
+        for field_name in ("top_k", "randomness", "queue_length", "library_path"):
             self.assertIn(field_name, rendered)
 
 

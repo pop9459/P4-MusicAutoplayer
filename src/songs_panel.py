@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .folder_panel import FolderEntry
+from .library import ALL_TRACKS_FOLDER_ID, Library
 from .track_analyzer import Catalog, TrackRecord
 
 
@@ -16,10 +18,18 @@ class SongsPanel:
     scroll_offset: int = 0
     status_message: str = ""
 
-    def load_songs_from_catalog(self, catalog: Catalog) -> None:
-        """Load songs from catalog, extract enabled tracks."""
-        self.catalog = catalog
-        self.songs = [track for track in catalog.tracks if track.enabled]
+    def load_songs_from_library(self, library: Library, folder_entry: FolderEntry) -> None:
+        """Load enabled songs for the selected folder entry (or every
+        enabled track, for the virtual All Tracks entry)."""
+        self.catalog = library.catalog
+        if folder_entry.id == ALL_TRACKS_FOLDER_ID:
+            self.songs = [track for track in library.catalog.tracks if track.enabled]
+        else:
+            self.songs = [
+                track
+                for track in library.catalog.tracks
+                if track.enabled and track.folder_id == folder_entry.id
+            ]
         self.selected_index = 0
         self.selected_song = self.songs[0] if self.songs else None
         self.scroll_offset = 0

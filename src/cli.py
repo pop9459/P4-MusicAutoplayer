@@ -5,9 +5,18 @@ import sys
 from pathlib import Path
 from typing import Callable, Sequence
 
-from . import player
-from . import tui_player
 from . import player_ui_v2
+from .library import (
+    Library,
+    add_folder,
+    library_needs_migration,
+    list_folders,
+    load_library,
+    migrate_settings_to_library,
+    new_library,
+    remove_folder,
+    save_library,
+)
 from .predictor import generate_queue, rank_candidates, recommend_next_track
 from .settings import DEFAULT_SETTINGS_PATH, Settings, load_settings
 from .track_analyzer import Catalog, TrackRecord, build_catalog, load_catalog, save_catalog, scan_library
@@ -139,10 +148,54 @@ def _command_queue(args: argparse.Namespace) -> None:
 
 
 def _command_play(args: argparse.Namespace, settings: Settings) -> None:
-    catalog = _load_or_build_catalog(args.catalog, args.music_dir)
-    exit_code = player_ui_v2.run(catalog, settings, args.settings or DEFAULT_SETTINGS_PATH)
+    settings_path = args.settings or DEFAULT_SETTINGS_PATH
+    if library_needs_migration(settings):
+        library = migrate_settings_to_library(settings, settings_path)
+    else:
+        library = load_library(settings.library_path)
+    exit_code = player_ui_v2.run(library, settings, settings_path)
     if exit_code:
         raise SystemExit(exit_code)
+
+
+def _resolve_library_path(args: argparse.Namespace, settings: Settings | None) -> Path:
+    if getattr(args, "library", None) is not None:
+        return args.library
+    if settings is not None:
+        return settings.library_path
+    raise ValueError("No library path given: pass --library or ensure settings.json exists.")
+
+
+def _command_add_folder(args: argparse.Namespace, settings: Settings | None = None) -> None:
+    library_path = _resolve_library_path(args, settings)
+    library = load_library(library_path) if library_path.exists() else new_library()
+
+    def _print_progress(scanned: int, total: int) -> None:
+        print(f"\rScanning: {scanned}/{total}", end="", flush=True)
+
+    new_lib, folder, was_added = add_folder(library, args.path, progress_callback=_print_progress)
+    print()
+    if not was_added:
+        print(f"Folder already tracked: {folder.path} (skipped)")
+        return
+    save_library(new_lib, library_path)
+    print(f"Added folder {folder.path} ({folder.track_count} tracks). Library saved to {library_path}.")
+
+
+def _command_list_folders(args: argparse.Namespace, settings: Settings | None = None) -> None:
+    library_path = _resolve_library_path(args, settings)
+    library = load_library(library_path)
+    for folder in list_folders(library):
+        print(f"{folder.id}  {folder.track_count:5d} tracks  {folder.path}")
+    print(f"{len(library.folders)} folders, {len(library.catalog.tracks)} tracks total.")
+
+
+def _command_remove_folder(args: argparse.Namespace, settings: Settings | None = None) -> None:
+    library_path = _resolve_library_path(args, settings)
+    library = load_library(library_path)
+    new_lib = remove_folder(library, args.folder_id)
+    save_library(new_lib, library_path)
+    print(f"Removed folder {args.folder_id}. {len(new_lib.folders)} folders remain.")
 
 
 def _add_catalog_arguments(parser: argparse.ArgumentParser) -> None:
@@ -192,21 +245,33 @@ def build_parser() -> argparse.ArgumentParser:
     queue.add_argument("--max-consecutive-artist", type=_positive_int, help="Max same-artist tracks allowed in a row (omit for no cap). Defaults to settings.json.")
     queue.set_defaults(handler=_command_queue)
 
-    play = subparsers.add_parser("play", help="Run the demo TUI player (requires mpv).")
-    _add_catalog_arguments(play)
-    play.add_argument("--track-id", help="Starting track ID. If omitted, an interactive picker is shown.")
+    play = subparsers.add_parser("play", help="Run the 3-column TUI player (requires mpv).")
     play.add_argument("--top-k", type=_positive_int, help="Number of highest-ranked candidates eligible for each selection. Defaults to settings.json.")
     play.add_argument("--randomness", type=_randomness, help="Weighted random selection factor from 0.0 to 1.0. Defaults to settings.json.")
     play.add_argument("--length", type=_positive_int, help="Queue length to (re)generate at a time. Defaults to settings.json.")
     play.set_defaults(handler=_command_play)
 
+    add_folder_parser = subparsers.add_parser("add-folder", help="Recursively scan and track a music folder in the library.")
+    add_folder_parser.add_argument("--path", type=Path, required=True, help="Folder to scan and add.")
+    add_folder_parser.add_argument("--library", type=Path, help="Path to library.json. Defaults to settings.json.")
+    add_folder_parser.set_defaults(handler=_command_add_folder)
+
+    list_folders_parser = subparsers.add_parser("list-folders", help="List tracked folders in the library.")
+    list_folders_parser.add_argument("--library", type=Path, help="Path to library.json. Defaults to settings.json.")
+    list_folders_parser.set_defaults(handler=_command_list_folders)
+
+    remove_folder_parser = subparsers.add_parser("remove-folder", help="Remove a tracked folder (and its tracks) from the library.")
+    remove_folder_parser.add_argument("--folder-id", required=True, help="ID of the folder to remove (see list-folders).")
+    remove_folder_parser.add_argument("--library", type=Path, help="Path to library.json. Defaults to settings.json.")
+    remove_folder_parser.set_defaults(handler=_command_remove_folder)
+
     return parser
 
 
 def _apply_settings_defaults(args: argparse.Namespace, settings: Settings) -> None:
-    if args.catalog is None:
+    if hasattr(args, "catalog") and args.catalog is None:
         args.catalog = settings.catalog_path
-    if args.music_dir is None:
+    if hasattr(args, "music_dir") and args.music_dir is None:
         args.music_dir = settings.music_directory
     if hasattr(args, "top_k") and args.top_k is None:
         args.top_k = settings.top_k
@@ -218,16 +283,23 @@ def _apply_settings_defaults(args: argparse.Namespace, settings: Settings) -> No
         args.max_consecutive_artist = settings.max_consecutive_same_artist
 
 
+_LIBRARY_COMMANDS = {"add-folder", "list-folders", "remove-folder"}
+
+
 def _needs_settings(args: argparse.Namespace) -> bool:
+    if args.command == "play":
+        return True
+    if args.command in _LIBRARY_COMMANDS:
+        return getattr(args, "library", None) is None
     if args.catalog is None:
         return True
     if not args.catalog.exists() and args.music_dir is None:
         return True
     if args.command == "build-catalog":
         return args.music_dir is None
-    if args.command in {"recommend", "queue", "play"} and (args.top_k is None or args.randomness is None):
+    if args.command in {"recommend", "queue"} and (args.top_k is None or args.randomness is None):
         return True
-    return args.command in {"queue", "play"} and args.length is None
+    return args.command == "queue" and args.length is None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -239,7 +311,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             settings = load_settings(args.settings or DEFAULT_SETTINGS_PATH)
             _apply_settings_defaults(args, settings)
         handler: Callable = args.handler
-        if args.command == "play" and settings is not None:
+        if args.command == "play" or args.command in _LIBRARY_COMMANDS:
             handler(args, settings)
         else:
             handler(args)

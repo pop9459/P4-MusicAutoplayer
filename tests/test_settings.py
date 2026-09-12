@@ -42,6 +42,41 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.music_directory, self.root / "music")
         self.assertEqual(settings.queue_length, 1)
 
+    def test_library_path_defaults_to_data_library_json_for_legacy_settings(self) -> None:
+        settings = load_settings(self.settings_path)
+
+        self.assertEqual(settings.library_path, self.root / "data" / "library.json")
+
+    def test_library_path_is_read_when_present(self) -> None:
+        self.settings_path.write_text(json.dumps({
+            "version": 1,
+            "library_path": "mylib.json",
+            "top_k": 1,
+            "randomness": 0.0,
+            "queue_length": 1,
+        }), encoding="utf-8")
+
+        settings = load_settings(self.settings_path)
+
+        self.assertEqual(settings.library_path, self.root / "mylib.json")
+        self.assertIsNone(settings.catalog_path)
+        self.assertIsNone(settings.music_folders)
+
+    def test_save_settings_omits_legacy_fields_once_migrated(self) -> None:
+        from dataclasses import replace
+
+        from src.settings import save_settings
+
+        settings = load_settings(self.settings_path)
+        migrated = replace(settings, catalog_path=None, music_directory=None, music_folders=None)
+        save_settings(migrated, self.settings_path)
+
+        payload = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        self.assertNotIn("catalog_path", payload)
+        self.assertNotIn("music_directory", payload)
+        self.assertNotIn("music_folders", payload)
+        self.assertIn("library_path", payload)
+
     def test_load_settings_rejects_invalid_randomness(self) -> None:
         self.settings_path.write_text('{"version": 1, "catalog_path": "catalog.json", "music_directory": "music", "top_k": 1, "randomness": 2, "queue_length": 1}', encoding="utf-8")
 

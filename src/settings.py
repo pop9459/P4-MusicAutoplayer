@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .json_io import load_json, save_json
+
 SETTINGS_VERSION = 1
 DEFAULT_SETTINGS_PATH = Path("settings.json")
 DEFAULT_MAX_CONSECUTIVE_SAME_ARTIST = 3
@@ -12,16 +14,24 @@ DEFAULT_MAX_CONSECUTIVE_SAME_ARTIST = 3
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    catalog_path: Path
-    music_directory: Path
-    music_folders: tuple[Path, ...] | None
+    library_path: Path
     top_k: int
     randomness: float
     queue_length: int
     max_consecutive_same_artist: int | None
+    # Legacy fields, retained only so pre-library.json settings.json files can
+    # be read and migrated (see src/library.py: migrate_settings_to_library).
+    # No longer authoritative once library_path exists on disk.
+    catalog_path: Path | None = None
+    music_directory: Path | None = None
+    music_folders: tuple[Path, ...] | None = None
 
     def with_music_directory(self, new_directory: Path) -> Settings:
-        """Return a new Settings with updated music_directory and folders."""
+        """Return a new Settings with updated music_directory and folders.
+
+        Retained for the legacy v1 TUI (src/tui_player.py), which still
+        edits a single music_directory in place.
+        """
         from dataclasses import replace
         return replace(self, music_directory=new_directory, music_folders=(new_directory,))
 
@@ -68,8 +78,12 @@ def _migrate_music_directory_to_folders(music_directory: str, settings_path: Pat
     return (_resolve_path(music_directory, settings_path),)
 
 
-def _load_music_folders(payload: dict[str, Any], settings_path: Path) -> tuple[Path, ...]:
-    """Load music_folders if present; otherwise migrate from music_directory."""
+def _load_music_folders(payload: dict[str, Any], settings_path: Path) -> tuple[Path, ...] | None:
+    """Load legacy music_folders/music_directory, if present, for migration.
+
+    Returns None for new-style settings files that carry neither field
+    (library.json is the source of truth for folders once it exists).
+    """
     if "music_folders" in payload:
         folders = payload.get("music_folders")
         if not isinstance(folders, list) or not folders:
@@ -78,9 +92,10 @@ def _load_music_folders(payload: dict[str, Any], settings_path: Path) -> tuple[P
         if not resolved:
             raise ValueError("Settings field 'music_folders' must contain valid folder paths")
         return resolved
-    # Backward compatibility: migrate music_directory to folders
-    music_dir = _require_string(payload, "music_directory")
-    return _migrate_music_directory_to_folders(music_dir, settings_path)
+    if "music_directory" in payload:
+        music_dir = _require_string(payload, "music_directory")
+        return _migrate_music_directory_to_folders(music_dir, settings_path)
+    return None
 
 
 def _resolve_path(value: str, settings_path: Path) -> Path:
@@ -93,8 +108,7 @@ def _resolve_path(value: str, settings_path: Path) -> Path:
 def load_settings(path: str | Path = DEFAULT_SETTINGS_PATH) -> Settings:
     settings_path = Path(path)
     try:
-        with settings_path.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
+        payload = load_json(settings_path)
     except FileNotFoundError:
         raise FileNotFoundError(f"Settings file not found: {settings_path}") from None
     except json.JSONDecodeError as error:
@@ -106,23 +120,34 @@ def load_settings(path: str | Path = DEFAULT_SETTINGS_PATH) -> Settings:
         raise ValueError(f"Settings field 'version' must be {SETTINGS_VERSION}")
 
     music_folders = _load_music_folders(payload, settings_path)
-    music_directory = music_folders[0]
+    music_directory = music_folders[0] if music_folders else None
+
+    if "library_path" in payload:
+        library_path = _resolve_path(_require_string(payload, "library_path"), settings_path)
+    else:
+        library_path = settings_path.parent / "data" / "library.json"
+
+    catalog_path = (
+        _resolve_path(payload["catalog_path"], settings_path)
+        if isinstance(payload.get("catalog_path"), str)
+        else None
+    )
 
     return Settings(
-        catalog_path=_resolve_path(_require_string(payload, "catalog_path"), settings_path),
-        music_directory=music_directory,
-        music_folders=music_folders,
+        library_path=library_path,
         top_k=_require_positive_int(payload, "top_k"),
         randomness=_require_randomness(payload),
         queue_length=_require_positive_int(payload, "queue_length"),
         max_consecutive_same_artist=_load_max_consecutive_same_artist(payload),
+        catalog_path=catalog_path,
+        music_directory=music_directory,
+        music_folders=music_folders,
     )
 
 
 def save_settings(settings: Settings, path: str | Path = DEFAULT_SETTINGS_PATH) -> None:
     """Save settings back to JSON file, preserving music_folders if present."""
     settings_path = Path(path)
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Resolve paths relative to settings file for storage
     def _relative_path(p: Path) -> str:
@@ -131,19 +156,25 @@ def save_settings(settings: Settings, path: str | Path = DEFAULT_SETTINGS_PATH) 
         except ValueError:
             return str(p)
 
-    payload = {
+    payload: dict[str, Any] = {
         "version": SETTINGS_VERSION,
-        "catalog_path": _relative_path(settings.catalog_path),
-        "music_directory": _relative_path(settings.music_directory),
+        "library_path": _relative_path(settings.library_path),
         "top_k": settings.top_k,
         "randomness": settings.randomness,
         "queue_length": settings.queue_length,
         "max_consecutive_same_artist": settings.max_consecutive_same_artist,
     }
 
+    # Legacy fields are only written back if this Settings still carries them
+    # (i.e. it was loaded from a not-yet-migrated settings.json and hasn't
+    # been through migrate_settings_to_library yet). Once migrated, callers
+    # construct a Settings without these, so save_settings stops emitting
+    # them and settings.json becomes preferences-only.
+    if settings.catalog_path is not None:
+        payload["catalog_path"] = _relative_path(settings.catalog_path)
+    if settings.music_directory is not None:
+        payload["music_directory"] = _relative_path(settings.music_directory)
     if settings.music_folders and len(settings.music_folders) > 1:
         payload["music_folders"] = [_relative_path(folder) for folder in settings.music_folders]
 
-    with settings_path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, ensure_ascii=True)
-        handle.write("\n")
+    save_json(settings_path, payload)

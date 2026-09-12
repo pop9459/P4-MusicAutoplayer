@@ -1,3 +1,11 @@
+from .library import (
+    Library,
+    LibraryFolder,
+    add_folder,
+    load_library,
+    remove_folder,
+    save_library,
+)
 from .mpv_backend import MpvBackend, MpvUnavailableError
 from .predictor import (
     generate_queue,

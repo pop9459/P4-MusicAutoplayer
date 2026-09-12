@@ -110,6 +110,80 @@ class PlayerEngineTests(unittest.TestCase):
         self.assertEqual(engine.queue, [])
         self.assertIsNone(engine.advance())
 
+    def test_defer_queue_leaves_queue_empty_until_ensure_queue_ready(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3, defer_queue=True)
+
+        self.assertEqual(engine.queue, [])
+
+        engine.ensure_queue_ready()
+
+        self.assertEqual(len(engine.queue), 3)
+
+    def test_ensure_queue_ready_is_a_noop_once_queue_exists(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3, defer_queue=True)
+        engine.ensure_queue_ready()
+        first_queue = list(engine.queue)
+
+        engine.ensure_queue_ready()
+
+        self.assertEqual([t.id for t in engine.queue], [t.id for t in first_queue])
+
+    def test_advance_immediate_then_top_up_queue_matches_advance(self) -> None:
+        rng_seed = 42
+        engine_combined = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3, rng=random.Random(rng_seed))
+        engine_split = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3, rng=random.Random(rng_seed))
+
+        combined_next = engine_combined.advance()
+
+        split_next = engine_split.advance_immediate()
+        # Queue is not topped up yet -- current track moved, refill pending.
+        self.assertLessEqual(len(engine_split.queue), len(engine_combined.queue))
+        engine_split.top_up_queue()
+
+        self.assertEqual(combined_next.id, split_next.id)
+        self.assertEqual([t.id for t in engine_split.queue], [t.id for t in engine_combined.queue])
+        self.assertEqual(engine_split.queue_regenerated, engine_combined.queue_regenerated)
+
+    def test_build_initial_queue_steps_grows_queue_incrementally(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3, defer_queue=True)
+        steps = engine.build_initial_queue_steps()
+
+        next(steps)
+        self.assertEqual(len(engine.queue), 1)
+        next(steps)
+        self.assertEqual(len(engine.queue), 2)
+        list(steps)
+        self.assertEqual(len(engine.queue), 3)
+
+    def test_build_initial_queue_steps_matches_refill_if_needed(self) -> None:
+        engine_stepped = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3, rng=random.Random(3), defer_queue=True)
+        engine_bulk = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3, rng=random.Random(3))
+
+        list(engine_stepped.build_initial_queue_steps())
+
+        self.assertEqual([t.id for t in engine_stepped.queue], [t.id for t in engine_bulk.queue])
+        self.assertTrue(engine_stepped.queue_regenerated)
+
+    def test_top_up_queue_steps_grows_queue_incrementally(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3)
+        engine.queue = []  # force a full top-up from empty
+
+        steps = engine.top_up_queue_steps()
+        next(steps)
+        self.assertEqual(len(engine.queue), 1)
+        list(steps)
+        self.assertEqual(len(engine.queue), 3)
+
+    def test_advance_immediate_returns_none_without_mutating_state_when_queue_empty(self) -> None:
+        tiny_catalog = build_catalog([
+            TrackRecord(id="only", path="/music/only.mp3", title="Only", artist="A"),
+        ])
+        only_track = tiny_catalog.tracks[0]
+        engine = PlayerEngine(tiny_catalog, only_track, top_k=5, randomness=0.0, queue_length=3)
+
+        self.assertIsNone(engine.advance_immediate())
+        self.assertEqual(engine.current_track.id, "only")
+
 
 def _max_consecutive_run(values: list[str]) -> int:
     longest = 0

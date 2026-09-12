@@ -17,9 +17,10 @@ from __future__ import annotations
 import curses
 import random
 from dataclasses import dataclass
+from typing import Iterator
 
 from .mpv_backend import MpvBackend, MpvUnavailableError
-from .predictor import generate_queue, recommend_next_track
+from .predictor import generate_queue_steps, recommend_next_track
 from .track_analyzer import Catalog, TrackRecord
 
 POLL_INTERVAL_MS = 200
@@ -56,6 +57,7 @@ class PlayerEngine:
         queue_length: int,
         rng: random.Random | None = None,
         max_consecutive_same_artist: int | None = 3,
+        defer_queue: bool = False,
     ) -> None:
         self.catalog = catalog
         self.top_k = top_k
@@ -67,12 +69,24 @@ class PlayerEngine:
         self.queue: list[TrackRecord] = []
         self.history: list[TrackRecord] = [start_track]
         self.queue_regenerated = False
+        if not defer_queue:
+            self._refill_if_needed()
+
+    def ensure_queue_ready(self) -> None:
+        """Build the initial queue if it hasn't been built yet.
+
+        Lets a caller start mpv playback (`defer_queue=True` at construction)
+        before paying the cost of `generate_queue`'s full-catalog scan, so
+        audio starts immediately instead of waiting behind queue assembly.
+        """
         self._refill_if_needed()
 
-    def _refill_if_needed(self) -> None:
-        if self.queue:
-            return
-        self.queue = generate_queue(
+    def build_initial_queue_steps(self) -> Iterator[TrackRecord]:
+        """Build the initial queue one track at a time, appending each pick
+        to `self.queue` and yielding it as it's chosen -- lets a caller (the
+        TUI) reveal the queue filling in rather than updating it all at once.
+        """
+        for next_track in generate_queue_steps(
             self.current_track.id,
             self.catalog,
             length=self.queue_length,
@@ -80,19 +94,25 @@ class PlayerEngine:
             randomness=self.randomness,
             rng=self.rng,
             max_consecutive_same_artist=self.max_consecutive_same_artist,
-        )
+        ):
+            self.queue.append(next_track)
+            yield next_track
         self.queue_regenerated = True
 
-    def _top_up_queue(self) -> bool:
+    def _refill_if_needed(self) -> None:
+        if self.queue:
+            return
+        list(self.build_initial_queue_steps())
+
+    def top_up_queue_steps(self) -> Iterator[TrackRecord]:
         """Append recommendations one at a time until the queue is back to
-        `queue_length` (or no eligible tracks remain).
+        `queue_length` (or no eligible tracks remain), yielding each track as
+        it's appended.
 
         Excludes the current track, the entire play history, and everything
         already queued, so no track repeats within the session while there
-        are still unseen tracks to recommend. Returns True if at least one
-        track was appended.
+        are still unseen tracks to recommend.
         """
-        added_any = False
         recent_artists = [track.artist for track in self.history] + [track.artist for track in self.queue]
         while len(self.queue) < self.queue_length:
             reference_id = self.queue[-1].id if self.queue else self.current_track.id
@@ -114,11 +134,35 @@ class PlayerEngine:
                 break
             self.queue.append(next_track)
             recent_artists.append(next_track.artist)
+            yield next_track
+
+    def _top_up_queue(self) -> bool:
+        added_any = False
+        for _ in self.top_up_queue_steps():
             added_any = True
         return added_any
 
     def peek_next(self) -> TrackRecord | None:
         return self.queue[0] if self.queue else None
+
+    def advance_immediate(self) -> TrackRecord | None:
+        """Move to the next queued track without refilling the queue.
+
+        Lets a caller start playback on the new current track before paying
+        the cost of `_top_up_queue`'s recommendation scan. Returns the new
+        current track, or None if the queue was already empty.
+        """
+        self.queue_regenerated = False
+        if not self.queue:
+            return None
+        self.current_track = self.queue.pop(0)
+        self.history.append(self.current_track)
+        return self.current_track
+
+    def top_up_queue(self) -> bool:
+        """Refill the queue back up to `queue_length`. See `_top_up_queue`."""
+        self.queue_regenerated = self._top_up_queue()
+        return self.queue_regenerated
 
     def advance(self) -> TrackRecord | None:
         """Move to the next queued track, topping the queue back up to
@@ -127,13 +171,11 @@ class PlayerEngine:
         Returns the new current track, or None if the queue was already
         empty (fully exhausted library, no eligible next track anywhere).
         """
-        self.queue_regenerated = False
-        if not self.queue:
+        next_track = self.advance_immediate()
+        if next_track is None:
             return None
-        self.current_track = self.queue.pop(0)
-        self.history.append(self.current_track)
-        self.queue_regenerated = self._top_up_queue()
-        return self.current_track
+        self.top_up_queue()
+        return next_track
 
 
 @dataclass

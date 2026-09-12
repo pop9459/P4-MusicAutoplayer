@@ -18,7 +18,7 @@ class SettingsPanelHydrationTests(unittest.TestCase):
         self.assertEqual(panel.top_k, DEFAULT_SETTINGS.top_k)
         self.assertEqual(panel.randomness, DEFAULT_SETTINGS.randomness)
         self.assertEqual(panel.queue_length, DEFAULT_SETTINGS.queue_length)
-        self.assertEqual(panel.catalog_path, DEFAULT_SETTINGS.catalog_path)
+        self.assertEqual(panel.library_path, DEFAULT_SETTINGS.library_path)
         self.assertEqual(panel.field_index, 0)
 
     def test_reload_discards_stale_edits(self) -> None:
@@ -85,11 +85,11 @@ class SettingsPanelAdjustmentTests(unittest.TestCase):
         self.panel.decrement()
         self.assertEqual(self.panel.randomness, 0.0)
 
-    def test_catalog_path_is_not_affected_by_increment(self) -> None:
-        self.panel.field_index = FIELDS.index("catalog_path")
-        original = self.panel.catalog_path
+    def test_library_path_is_not_affected_by_increment(self) -> None:
+        self.panel.field_index = FIELDS.index("library_path")
+        original = self.panel.library_path
         self.panel.increment()
-        self.assertEqual(self.panel.catalog_path, original)
+        self.assertEqual(self.panel.library_path, original)
 
 
 class SettingsPanelTextEditTests(unittest.TestCase):
@@ -97,29 +97,29 @@ class SettingsPanelTextEditTests(unittest.TestCase):
         self.panel = SettingsPanel()
         self.panel.load_from_settings(DEFAULT_SETTINGS)
 
-    def test_begin_text_edit_only_applies_to_catalog_path(self) -> None:
+    def test_begin_text_edit_only_applies_to_library_path(self) -> None:
         self.panel.field_index = FIELDS.index("top_k")
         self.panel.begin_text_edit()
         self.assertFalse(self.panel.editing_text)
 
-    def test_begin_and_apply_text_edit_updates_catalog_path(self) -> None:
-        self.panel.field_index = FIELDS.index("catalog_path")
+    def test_begin_and_apply_text_edit_updates_library_path(self) -> None:
+        self.panel.field_index = FIELDS.index("library_path")
         self.panel.begin_text_edit()
         self.assertTrue(self.panel.editing_text)
 
         self.panel.apply_text_edit("new/catalog.json")
-        self.assertEqual(self.panel.catalog_path, Path("new/catalog.json"))
+        self.assertEqual(self.panel.library_path, Path("new/catalog.json"))
         self.assertFalse(self.panel.editing_text)
 
     def test_apply_text_edit_ignores_blank_value(self) -> None:
-        self.panel.field_index = FIELDS.index("catalog_path")
-        original = self.panel.catalog_path
+        self.panel.field_index = FIELDS.index("library_path")
+        original = self.panel.library_path
         self.panel.begin_text_edit()
         self.panel.apply_text_edit("   ")
-        self.assertEqual(self.panel.catalog_path, original)
+        self.assertEqual(self.panel.library_path, original)
 
     def test_cancel_text_edit_clears_flag(self) -> None:
-        self.panel.field_index = FIELDS.index("catalog_path")
+        self.panel.field_index = FIELDS.index("library_path")
         self.panel.begin_text_edit()
         self.panel.cancel_text_edit()
         self.assertFalse(self.panel.editing_text)
@@ -145,8 +145,11 @@ class SettingsPanelSaveTests(unittest.TestCase):
         updated = self.panel.to_settings()
 
         self.assertEqual(updated.top_k, DEFAULT_SETTINGS.top_k + 1)
-        self.assertEqual(updated.music_folders, DEFAULT_SETTINGS.music_folders)
-        self.assertEqual(updated.music_directory, DEFAULT_SETTINGS.music_directory)
+        # SettingsPanel.to_settings() clears legacy fields: once a user saves
+        # via the TUI, settings.json becomes preferences-only (library.json
+        # is the source of truth for folders).
+        self.assertIsNone(updated.music_folders)
+        self.assertIsNone(updated.music_directory)
 
     def test_to_settings_without_load_raises(self) -> None:
         panel = SettingsPanel()

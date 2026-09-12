@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .settings import Settings
 
-FIELDS = ("top_k", "randomness", "queue_length", "catalog_path")
+FIELDS = ("top_k", "randomness", "queue_length", "library_path")
 
 RANDOMNESS_STEP = 0.05
 
@@ -14,17 +14,14 @@ RANDOMNESS_STEP = 0.05
 @dataclass
 class SettingsPanel:
     """Editable copy of the fields a user can change without hand-editing
-    settings.json. Numeric fields adjust with +/-; `catalog_path` is edited
-    as free text. `music_folders` is shown read-only when there is more than
-    one folder -- editing an N-item path list via a curses line editor is
-    out of scope."""
+    settings.json. Numeric fields adjust with +/-; `library_path` is edited
+    as free text."""
 
     original: Settings | None = None
     top_k: int = 1
     randomness: float = 0.0
     queue_length: int = 1
-    catalog_path: Path = field(default_factory=Path)
-    music_folders: tuple[Path, ...] = ()
+    library_path: Path = field(default_factory=Path)
     field_index: int = 0
     editing_text: bool = False
     text_buffer: str = ""
@@ -36,8 +33,7 @@ class SettingsPanel:
         self.top_k = settings.top_k
         self.randomness = settings.randomness
         self.queue_length = settings.queue_length
-        self.catalog_path = settings.catalog_path
-        self.music_folders = settings.music_folders or ()
+        self.library_path = settings.library_path
         self.field_index = 0
         self.editing_text = False
         self.text_buffer = ""
@@ -71,16 +67,16 @@ class SettingsPanel:
             self.queue_length = max(1, self.queue_length - 1)
 
     def begin_text_edit(self) -> None:
-        """Start editing `catalog_path` as free text (only editable text field)."""
-        if self.current_field() != "catalog_path":
+        """Start editing `library_path` as free text (only editable text field)."""
+        if self.current_field() != "library_path":
             return
         self.editing_text = True
-        self.text_buffer = str(self.catalog_path)
+        self.text_buffer = str(self.library_path)
 
     def apply_text_edit(self, value: str) -> None:
         value = value.strip()
         if value:
-            self.catalog_path = Path(value)
+            self.library_path = Path(value)
         self.editing_text = False
         self.text_buffer = ""
 
@@ -95,7 +91,7 @@ class SettingsPanel:
             self.top_k != self.original.top_k
             or self.randomness != self.original.randomness
             or self.queue_length != self.original.queue_length
-            or self.catalog_path != self.original.catalog_path
+            or self.library_path != self.original.library_path
         )
 
     def to_settings(self) -> Settings:
@@ -106,5 +102,8 @@ class SettingsPanel:
             top_k=self.top_k,
             randomness=self.randomness,
             queue_length=self.queue_length,
-            catalog_path=self.catalog_path,
+            library_path=self.library_path,
+            catalog_path=None,
+            music_directory=None,
+            music_folders=None,
         )

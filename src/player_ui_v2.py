@@ -1,23 +1,48 @@
 """3-column layout player with bottom player bar."""
+
 from __future__ import annotations
 
 import curses
 import random
+import shutil
+import time
 from pathlib import Path
+from typing import Iterator
 
 from .folder_panel import FolderPanel
+from .library import (
+    Library,
+    ScanTask,
+    find_folder_by_path,
+    load_library,
+    save_library,
+    start_add_folder_task,
+)
 from .mpv_backend import MpvBackend, MpvUnavailableError
 from .player import PlayerEngine, filter_enabled_tracks
 from .player_bar import PlayerBar
-from .predictor import generate_queue
 from .queue_panel import QueuePanel
 from .settings import DEFAULT_SETTINGS_PATH, Settings, load_settings, save_settings
 from .settings_panel import FIELDS as SETTINGS_FIELDS
 from .settings_panel import SettingsPanel
 from .songs_panel import SongsPanel
-from .track_analyzer import Catalog, TrackRecord, load_catalog
+from .track_analyzer import Catalog, TrackRecord
 
 POLL_INTERVAL_MS = 200
+
+# Pause after each track is added to the queue during the animated reveal
+# (see _reveal_queue_growth), so the one-by-one build stays visible even
+# though generation itself is fast (tens of ms per track at 2500 tracks).
+QUEUE_REVEAL_DELAY_S = 0.01
+
+# Rows the terminal height loses before it becomes the queue's visible-row
+# budget: _render_layout's content_height = height - 4 (player bar), then
+# _render_queue reserves 1 row for its header and passes `content_height - 2`
+# to QueuePanel.get_visible_queue -- so the queue column can show
+# (height - 4) - 2 = height - 6 rows before needing to scroll.
+QUEUE_COLUMN_CHROME_ROWS = 6
+
+MIN_QUEUE_LENGTH = 10
 
 # Color pair IDs. Initialized lazily in _init_colors() (only once a real
 # curses screen is running) rather than in __init__, since Player3Column is
@@ -35,13 +60,13 @@ class Player3Column:
 
     def __init__(
         self,
-        catalog: Catalog,
+        library: Library,
         settings: Settings,
         backend: MpvBackend,
         *,
         settings_path: Path = DEFAULT_SETTINGS_PATH,
     ) -> None:
-        self.catalog = catalog
+        self.library = library
         self.settings = settings
         self.settings_path = settings_path
         self.backend = backend
@@ -59,12 +84,26 @@ class Player3Column:
         self._colors_ready = False
         self._has_colors = False
 
+        self._scan_task: ScanTask | None = None
+        self._adding_folder = False
+
+        # Set once run_loop starts (None beforehand, e.g. during this
+        # __init__'s own initial engine setup below, before curses exists).
+        self._stdscr: curses._CursesWindow | None = None
+        self._term_height: int | None = None
+
         # Init folder panel
-        self.folder_panel.load_folders_from_settings(settings)
-        if self.folder_panel.selected_folder:
-            self.songs_panel.load_songs_from_catalog(catalog)
+        self.folder_panel.load_from_library(library)
+        if self.folder_panel.selected_entry:
+            self.songs_panel.load_songs_from_library(
+                self.library, self.folder_panel.selected_entry
+            )
             if self.songs_panel.songs:
                 self._init_engine_with_song(self.songs_panel.songs[0])
+
+    @property
+    def catalog(self) -> Catalog:
+        return self.library.catalog
 
     def _init_colors(self) -> None:
         """Set up color pairs. Only safe to call once a real curses screen
@@ -89,7 +128,11 @@ class Player3Column:
         focused = self.active_column == column
         if not self._has_colors:
             return curses.A_STANDOUT if focused else curses.A_REVERSE
-        return (curses.color_pair(COLOR_FOCUSED) | curses.A_BOLD) if focused else curses.color_pair(COLOR_UNFOCUSED)
+        return (
+            (curses.color_pair(COLOR_FOCUSED) | curses.A_BOLD)
+            if focused
+            else curses.color_pair(COLOR_UNFOCUSED)
+        )
 
     def _header_attr(self, column: int) -> int:
         """Highlight attribute for a column header, accenting the focused column."""
@@ -99,19 +142,49 @@ class Player3Column:
             return curses.A_BOLD | curses.A_UNDERLINE
         return curses.color_pair(COLOR_HEADER) | curses.A_BOLD
 
+    def _effective_queue_length(self) -> int:
+        """Queue length sized to fill the visible queue column, so it plays
+        without needing to scroll -- floored at 10 and at the configured
+        `settings.queue_length` (whichever of the three is largest wins).
+
+        Uses the last known terminal height (updated each render tick in
+        _render_layout); falls back to the real terminal size for the very
+        first engine build in __init__, which runs before curses starts.
+        """
+        height = self._term_height or shutil.get_terminal_size().lines
+        visible_rows = max(0, height - QUEUE_COLUMN_CHROME_ROWS)
+        return max(MIN_QUEUE_LENGTH, self.settings.queue_length, visible_rows)
+
+    def _reveal_queue_growth(self, steps: Iterator[TrackRecord]) -> None:
+        """Consume a `PlayerEngine` queue-building generator, redrawing after
+        each track is appended so the queue column fills in one track at a
+        time instead of jumping straight to the finished list."""
+        for _ in steps:
+            self.queue_panel.update_queue(list(self.engine.queue))
+            if self._stdscr is not None:
+                self._render_layout(self._stdscr)
+                time.sleep(QUEUE_REVEAL_DELAY_S)
+
     def _init_engine_with_song(self, track: TrackRecord) -> None:
-        """Initialize player engine with starting track."""
+        """Initialize player engine with starting track.
+
+        Starts mpv playback before building the recommendation queue: queue
+        generation does a full-catalog similarity scan per queue slot, which
+        can take seconds on a large library, and there is no reason to make
+        the user wait through that before hearing audio.
+        """
         self.engine = PlayerEngine(
             self.catalog,
             track,
             top_k=self.settings.top_k,
             randomness=self.settings.randomness,
-            queue_length=self.settings.queue_length,
+            queue_length=self._effective_queue_length(),
             max_consecutive_same_artist=self.settings.max_consecutive_same_artist,
+            defer_queue=True,
         )
         self.player_bar.update_track(track)
-        self.queue_panel.update_queue(self.engine.queue)
         self.backend.load_file(track.path)
+        self._reveal_queue_growth(self.engine.build_initial_queue_steps())
 
     def _play_random_song(self) -> None:
         """Pick random song from current folder."""
@@ -133,19 +206,25 @@ class Player3Column:
         self.player_bar.set_status(f"Playing: {self.songs_panel.selected_song.title}")
 
     def _advance_track(self) -> bool:
-        """Advance to next track. Return False if queue exhausted."""
+        """Advance to next track. Return False if queue exhausted.
+
+        Loads the next track into mpv before topping the queue back up, for
+        the same reason as `_init_engine_with_song`: playback shouldn't wait
+        on a recommendation scan.
+        """
         if not self.engine:
             return False
 
-        next_track = self.engine.advance()
+        next_track = self.engine.advance_immediate()
         if next_track is None:
             self.player_bar.set_status("Queue exhausted.")
             return False
 
         self.player_bar.update_track(next_track)
-        self.queue_panel.update_queue(self.engine.queue)
         self.player_bar.set_status(f"Playing: {next_track.title}")
         self.backend.load_file(next_track.path)
+        self._reveal_queue_growth(self.engine.top_up_queue_steps())
+        self.queue_panel.update_queue(list(self.engine.queue))
         return True
 
     def handle_folder_input(self, key: int) -> bool:
@@ -154,18 +233,23 @@ class Player3Column:
             return False
         elif key == curses.KEY_DOWN or key == ord("j"):
             self.folder_panel.next_folder()
-            # Load songs from new folder
-            if self.folder_panel.selected_folder:
-                self.songs_panel.load_songs_from_catalog(self.catalog)
+            if self.folder_panel.selected_entry:
+                self.songs_panel.load_songs_from_library(
+                    self.library, self.folder_panel.selected_entry
+                )
         elif key == curses.KEY_UP or key == ord("k"):
             self.folder_panel.previous_folder()
-            if self.folder_panel.selected_folder:
-                self.songs_panel.load_songs_from_catalog(self.catalog)
+            if self.folder_panel.selected_entry:
+                self.songs_panel.load_songs_from_library(
+                    self.library, self.folder_panel.selected_entry
+                )
         elif key == ord("\t"):
             self.active_column = 1
         elif key in (ord("\n"), ord(" ")):
             if self.songs_panel.songs:
                 self._play_selected_song()
+        elif key in (ord("a"), ord("A")):
+            self._begin_add_folder_prompt()
         elif key in (ord("s"), ord("S")):
             self._enter_settings_mode()
 
@@ -220,6 +304,110 @@ class Player3Column:
         self.settings_panel.load_from_settings(self.settings)
         self.mode = "settings"
 
+    def _begin_add_folder_prompt(self) -> None:
+        """Open a blocking path prompt (handled by _edit_text_field_for_folder
+        on the next run_loop tick) to add a new tracked folder. A path pasted
+        by drag-and-drop lands in the same prompt as a typed one, since most
+        terminals paste a dropped file's path as plain text."""
+        if self._scan_task is not None:
+            self.folder_panel.status_message = "Scan already in progress."
+            return
+        self._adding_folder = True
+
+    def _begin_add_folder_scan(self, raw_path: str) -> None:
+        raw_path = raw_path.strip()
+        if not raw_path:
+            return
+        path = Path(raw_path).expanduser()
+        existing = find_folder_by_path(self.library, path)
+        if existing is not None:
+            self.folder_panel.status_message = (
+                f"Already tracked: {existing.display_name}"
+            )
+            return
+        self.folder_panel.status_message = "Scanning: 0/0"
+        self._scan_task = start_add_folder_task(self.library, path)
+
+    def _poll_scan_task(self) -> None:
+        """Check on a running add-folder scan; apply its result once done."""
+        if self._scan_task is None:
+            return
+
+        if not self._scan_task.done.is_set():
+            scanned, total = self._scan_task.progress()
+            self.folder_panel.status_message = f"Scanning: {scanned}/{total}"
+            return
+
+        task = self._scan_task
+        self._scan_task = None
+
+        if task.error:
+            self.folder_panel.status_message = f"Add folder failed: {task.error[0]}"
+            return
+
+        new_library, folder, was_added = task.result[0]
+        self.library = new_library
+        try:
+            save_library(self.library, self.settings.library_path)
+        except OSError as error:
+            self.folder_panel.status_message = f"Save failed: {error}"
+
+        self.folder_panel.load_from_library(self.library)
+        for index, entry in enumerate(self.folder_panel.entries):
+            if entry.id == folder.id:
+                self.folder_panel.select_folder(index)
+                break
+        if self.folder_panel.selected_entry:
+            self.songs_panel.load_songs_from_library(
+                self.library, self.folder_panel.selected_entry
+            )
+        message = (
+            "Already tracked"
+            if not was_added
+            else f"Added {folder.display_name} ({folder.track_count} tracks)."
+        )
+        self.folder_panel.status_message = message
+
+    def _apply_settings(self) -> None:
+        """Persist the edited settings, then live-reapply them."""
+        new_settings = self.settings_panel.to_settings()
+        try:
+            save_settings(new_settings, self.settings_path)
+        except OSError as error:
+            self.settings_panel.status_message = f"Save failed: {error}"
+            return
+
+        library_changed = new_settings.library_path != self.settings.library_path
+        self.settings = new_settings
+
+        if library_changed:
+            try:
+                self.library = load_library(self.settings.library_path)
+            except (OSError, ValueError) as error:
+                self.settings_panel.status_message = f"Library reload failed: {error}"
+
+        self.folder_panel.load_from_library(self.library)
+        if self.folder_panel.selected_entry:
+            self.songs_panel.load_songs_from_library(
+                self.library, self.folder_panel.selected_entry
+            )
+
+        current_track = self.engine.current_track if self.engine else None
+        if current_track is None and self.songs_panel.songs:
+            current_track = self.songs_panel.songs[0]
+        if current_track is not None:
+            self._init_engine_with_song(current_track)
+
+        self.player_bar.set_status("Settings applied.")
+        self.mode = "player"
+
+    def _refresh_progress(self) -> None:
+        """Poll the backend for the current playback position/duration."""
+        if self.engine:
+            self.player_bar.update_progress(
+                self.backend.get_time_pos(), self.backend.get_duration()
+            )
+
     def handle_input(self, key: int) -> bool:
         """Dispatch key to active column, or to the settings screen if open.
         Return False to quit."""
@@ -254,71 +442,70 @@ class Player3Column:
 
         return True
 
-    def _apply_settings(self) -> None:
-        """Persist the edited settings, then live-reapply them."""
-        new_settings = self.settings_panel.to_settings()
-        try:
-            save_settings(new_settings, self.settings_path)
-        except OSError as error:
-            self.settings_panel.status_message = f"Save failed: {error}"
-            return
-
-        catalog_changed = new_settings.catalog_path != self.settings.catalog_path
-        self.settings = new_settings
-
-        if catalog_changed:
-            try:
-                self.catalog = load_catalog(self.settings.catalog_path)
-            except (OSError, ValueError) as error:
-                self.settings_panel.status_message = f"Catalog reload failed: {error}"
-
-        self.folder_panel.load_folders_from_settings(self.settings)
-        if self.folder_panel.selected_folder:
-            self.songs_panel.load_songs_from_catalog(self.catalog)
-
-        current_track = self.engine.current_track if self.engine else None
-        if current_track is None and self.songs_panel.songs:
-            current_track = self.songs_panel.songs[0]
-        if current_track is not None:
-            self._init_engine_with_song(current_track)
-
-        self.player_bar.set_status("Settings applied.")
-        self.mode = "player"
-
-    def _refresh_progress(self) -> None:
-        """Poll the backend for the current playback position/duration."""
-        if self.engine:
-            self.player_bar.update_progress(self.backend.get_time_pos(), self.backend.get_duration())
-
     def run_loop(self, stdscr: curses._CursesWindow) -> None:
         """Main event loop."""
+        self._stdscr = stdscr
         stdscr.timeout(POLL_INTERVAL_MS)
 
         while True:
             # Render all panels
             self._refresh_progress()
+            self._poll_scan_task()
             self._render_layout(stdscr)
 
             # Handle input or auto-advance
             key = stdscr.getch()
-            if key == -1 and self.engine and not self.player_bar.paused and self.backend.is_finished():
+            if (
+                key == -1
+                and self.engine
+                and not self.player_bar.paused
+                and self.backend.is_finished()
+            ):
                 if not self._advance_track():
                     return
             elif key != -1:
                 if not self.handle_input(key):
                     return
 
-            if self.settings_panel.editing_text:
+            if self._adding_folder:
+                self._adding_folder = False
+                self._prompt_add_folder(stdscr)
+            elif self.settings_panel.editing_text:
                 self._edit_text_field(stdscr)
+
+    def _prompt_add_folder(self, stdscr: curses._CursesWindow) -> None:
+        """Synchronously prompt for a folder path to add (blocking
+        curses.echo()/getstr(), same pattern as _edit_text_field)."""
+        height, width = stdscr.getmaxyx()
+        prompt = "Add folder path: "
+        stdscr.addnstr(
+            height - 1, 0, prompt.ljust(width - 1), width - 1, curses.A_REVERSE
+        )
+        stdscr.refresh()
+
+        curses.echo()
+        curses.curs_set(1)
+        stdscr.timeout(-1)
+        try:
+            raw = stdscr.getstr(height - 1, len(prompt), width - len(prompt) - 1)
+            value = raw.decode("utf-8", errors="replace")
+        finally:
+            curses.noecho()
+            curses.curs_set(0)
+            stdscr.timeout(POLL_INTERVAL_MS)
+
+        self._begin_add_folder_scan(value)
 
     def _edit_text_field(self, stdscr: curses._CursesWindow) -> None:
         """Synchronously prompt for a new value for the field currently being
-        text-edited (only src/settings_panel.py's `catalog_path` today).
+        text-edited (only src/settings_panel.py's `library_path` today).
         Needs `stdscr` directly (curses.echo()/getstr()), which is why this
         lives in run_loop's caller rather than handle_settings_input."""
         height, width = stdscr.getmaxyx()
         prompt = f"New {self.settings_panel.current_field()}: "
-        stdscr.addnstr(height - 1, 0, prompt.ljust(width - 1), width - 1, curses.A_REVERSE)
+        stdscr.addnstr(
+            height - 1, 0, prompt.ljust(width - 1), width - 1, curses.A_REVERSE
+        )
         stdscr.refresh()
 
         curses.echo()
@@ -341,6 +528,7 @@ class Player3Column:
 
         stdscr.erase()
         height, width = stdscr.getmaxyx()
+        self._term_height = height
 
         if self.mode == "settings":
             self._render_settings(stdscr, height, width)
@@ -360,10 +548,18 @@ class Player3Column:
 
         # Render songs. Content starts one column right of the divider so
         # the divider doesn't overwrite the first character of each row.
-        self._render_songs(stdscr, 0, col_width_folders + 1, col_width_songs - 1, content_height)
+        self._render_songs(
+            stdscr, 0, col_width_folders + 1, col_width_songs - 1, content_height
+        )
 
         # Render queue, same one-column offset for the same reason.
-        self._render_queue(stdscr, 0, col_width_folders + col_width_songs + 1, col_width_queue - 1, content_height)
+        self._render_queue(
+            stdscr,
+            0,
+            col_width_folders + col_width_songs + 1,
+            col_width_queue - 1,
+            content_height,
+        )
 
         # Dividing lines
         for y in range(content_height):
@@ -375,44 +571,114 @@ class Player3Column:
 
         stdscr.refresh()
 
-    def _render_folders(self, stdscr: curses._CursesWindow, row: int, col: int, width: int, height: int) -> None:
-        """Render folder list."""
-        stdscr.addnstr(row, col, "Folders".ljust(width - 1), width - 1, self._header_attr(0))
+    def _render_folders(
+        self, stdscr: curses._CursesWindow, row: int, col: int, width: int, height: int
+    ) -> None:
+        """Render folder list (All Tracks + tracked folders)."""
+        stdscr.addnstr(
+            row, col, "Folders".ljust(width - 1), width - 1, self._header_attr(0)
+        )
         row += 1
 
-        for i, folder in enumerate(self.folder_panel.folders):
-            attr = self._cursor_attr(0) if i == self.folder_panel.selected_index else curses.A_NORMAL
-            name = folder.name
-            stdscr.addnstr(row, col, f"  {name}".ljust(width - 1)[:width - 1], width - 1, attr)
+        for i, entry in enumerate(self.folder_panel.entries):
+            attr = (
+                self._cursor_attr(0)
+                if i == self.folder_panel.selected_index
+                else curses.A_NORMAL
+            )
+            stdscr.addnstr(
+                row,
+                col,
+                f"  {entry.display_name}".ljust(width - 1)[: width - 1],
+                width - 1,
+                attr,
+            )
             row += 1
-            if row >= height:
+            if row >= height - 1:
                 break
 
-    def _render_songs(self, stdscr: curses._CursesWindow, row: int, col: int, width: int, height: int) -> None:
-        """Render song list."""
-        stdscr.addnstr(row, col, "Songs".ljust(width - 1), width - 1, self._header_attr(1))
+        if self.folder_panel.status_message:
+            stdscr.addnstr(
+                height - 1,
+                col,
+                self.folder_panel.status_message[: width - 1],
+                width - 1,
+                curses.A_DIM,
+            )
+        elif row < height:
+            stdscr.addnstr(
+                height - 1,
+                col,
+                "[A] Add folder".ljust(width - 1)[: width - 1],
+                width - 1,
+                curses.A_DIM,
+            )
+
+    def _render_songs(
+        self, stdscr: curses._CursesWindow, row: int, col: int, width: int, height: int
+    ) -> None:
+        """Render selected-folder header (name/path/count) then the song list."""
+        entry = self.folder_panel.selected_entry
+        header = entry.display_name if entry else "Songs"
+        stdscr.addnstr(
+            row,
+            col,
+            header.ljust(width - 1)[: width - 1],
+            width - 1,
+            self._header_attr(1),
+        )
+        row += 1
+
+        path_text = entry.path if entry and entry.path else ""
+        stdscr.addnstr(
+            row, col, path_text.ljust(width - 1)[: width - 1], width - 1, curses.A_DIM
+        )
+        row += 1
+
+        count_text = f"{len(self.songs_panel.songs)} tracks"
+        stdscr.addnstr(
+            row, col, count_text.ljust(width - 1)[: width - 1], width - 1, curses.A_DIM
+        )
         row += 1
 
         # Random button: fixed row, always visible above the scrollable list.
         btn_attr = curses.A_BOLD if self.active_column == 1 else curses.A_NORMAL
-        stdscr.addnstr(row, col, "[R] Play Random".ljust(width - 1)[:width - 1], width - 1, btn_attr)
+        stdscr.addnstr(
+            row,
+            col,
+            "[R] Play Random".ljust(width - 1)[: width - 1],
+            width - 1,
+            btn_attr,
+        )
         row += 1
 
-        for track, idx, is_selected in self.songs_panel.get_visible_songs(height - 3):
+        for track, idx, is_selected in self.songs_panel.get_visible_songs(height - row):
             attr = self._cursor_attr(1) if is_selected else curses.A_NORMAL
-            line = f"{idx + 1}. {track.title}"[:width - 1]
+            line = f"{idx + 1}. {track.title}"[: width - 1]
             stdscr.addnstr(row, col, line.ljust(width - 1), width - 1, attr)
             row += 1
 
-    def _render_queue(self, stdscr: curses._CursesWindow, row: int, col: int, width: int, height: int) -> None:
+    def _render_queue(
+        self, stdscr: curses._CursesWindow, row: int, col: int, width: int, height: int
+    ) -> None:
         """Render upcoming queue."""
-        stdscr.addnstr(row, col, f"Queue ({len(self.queue_panel.queue)})".ljust(width - 1)[:width - 1], width - 1, self._header_attr(2))
+        stdscr.addnstr(
+            row,
+            col,
+            f"Queue ({len(self.queue_panel.queue)})".ljust(width - 1)[: width - 1],
+            width - 1,
+            self._header_attr(2),
+        )
         row += 1
 
-        head_attr = (curses.color_pair(COLOR_QUEUE_HEAD) | curses.A_BOLD) if self._has_colors else curses.A_BOLD
+        head_attr = (
+            (curses.color_pair(COLOR_QUEUE_HEAD) | curses.A_BOLD)
+            if self._has_colors
+            else curses.A_BOLD
+        )
         for track, _, is_first in self.queue_panel.get_visible_queue(height - 2):
             attr = head_attr if is_first else curses.A_NORMAL
-            line = f"{track.artist} - {track.title}"[:width - 1]
+            line = f"{track.artist} - {track.title}"[: width - 1]
             stdscr.addnstr(row, col, line.ljust(width - 1), width - 1, attr)
             row += 1
 
@@ -423,25 +689,41 @@ class Player3Column:
         padding = max(0, (width - len(text)) // 2)
         return " " * padding + text
 
-    def _render_player_bar(self, stdscr: curses._CursesWindow, row: int, width: int) -> None:
+    def _render_player_bar(
+        self, stdscr: curses._CursesWindow, row: int, width: int
+    ) -> None:
         """Render bottom player bar: state/track/controls, then a progress bar."""
         state = self.player_bar.get_state_display()
         track_display = self.player_bar.get_track_display()
         controls = "[Space]Play/Pause  [N]ext  [R]andom  [Q]uit"
 
-        bar_attr = curses.color_pair(COLOR_PLAYER_BAR) if self._has_colors else curses.A_REVERSE
+        bar_attr = (
+            curses.color_pair(COLOR_PLAYER_BAR)
+            if self._has_colors
+            else curses.A_REVERSE
+        )
         info_line = self._centered(f"[{state}] {track_display} | {controls}", width - 1)
         stdscr.addnstr(row, 0, info_line.ljust(width - 1), width - 1, bar_attr)
 
-        progress_attr = curses.color_pair(COLOR_PROGRESS) if self._has_colors else curses.A_NORMAL
-        progress_line = self._centered(self.player_bar.get_progress_display(), width - 1)
-        stdscr.addnstr(row + 1, 0, progress_line.ljust(width - 1), width - 1, progress_attr)
+        progress_attr = (
+            curses.color_pair(COLOR_PROGRESS) if self._has_colors else curses.A_NORMAL
+        )
+        progress_line = self._centered(
+            self.player_bar.get_progress_display(), width - 1
+        )
+        stdscr.addnstr(
+            row + 1, 0, progress_line.ljust(width - 1), width - 1, progress_attr
+        )
 
         if self.player_bar.status_message:
             status_line = self._centered(self.player_bar.status_message, width - 1)
-            stdscr.addnstr(row + 2, 0, status_line.ljust(width - 1), width - 1, curses.A_DIM)
+            stdscr.addnstr(
+                row + 2, 0, status_line.ljust(width - 1), width - 1, curses.A_DIM
+            )
 
-    def _render_settings(self, stdscr: curses._CursesWindow, height: int, width: int) -> None:
+    def _render_settings(
+        self, stdscr: curses._CursesWindow, height: int, width: int
+    ) -> None:
         """Full-screen settings editor, replacing the 3-column layout."""
         panel = self.settings_panel
         stdscr.addnstr(0, 0, "Settings".ljust(width - 1), width - 1, curses.A_BOLD)
@@ -450,31 +732,34 @@ class Player3Column:
             "top_k": str(panel.top_k),
             "randomness": f"{panel.randomness:.2f}",
             "queue_length": str(panel.queue_length),
-            "catalog_path": str(panel.catalog_path),
+            "library_path": str(panel.library_path),
         }
         row = 2
         for index, field_name in enumerate(SETTINGS_FIELDS):
-            attr = self._cursor_attr(0) if index == panel.field_index else curses.A_NORMAL
+            attr = (
+                self._cursor_attr(0) if index == panel.field_index else curses.A_NORMAL
+            )
             line = f"{field_name}: {values[field_name]}"
-            stdscr.addnstr(row, 2, line.ljust(width - 3)[:width - 3], width - 3, attr)
+            stdscr.addnstr(row, 2, line.ljust(width - 3)[: width - 3], width - 3, attr)
             row += 1
 
         row += 1
-        if len(panel.music_folders) > 1:
-            folders = ", ".join(str(folder) for folder in panel.music_folders)
-            stdscr.addnstr(row, 2, f"music_folders (read-only): {folders}"[:width - 3], width - 3, curses.A_DIM)
-            row += 2
-
         if panel.status_message:
-            stdscr.addnstr(row, 2, panel.status_message[:width - 3], width - 3, curses.A_DIM)
+            stdscr.addnstr(
+                row, 2, panel.status_message[: width - 3], width - 3, curses.A_DIM
+            )
             row += 1
 
-        hint = "[Up/Down] Move  [+/-] Adjust  [Enter] Edit  [A] Apply&Save  [Esc] Cancel"
-        stdscr.addnstr(height - 1, 0, hint.ljust(width - 1)[:width - 1], width - 1, curses.A_DIM)
+        hint = (
+            "[Up/Down] Move  [+/-] Adjust  [Enter] Edit  [A] Apply&Save  [Esc] Cancel"
+        )
+        stdscr.addnstr(
+            height - 1, 0, hint.ljust(width - 1)[: width - 1], width - 1, curses.A_DIM
+        )
 
 
 def run(
-    catalog: Catalog,
+    library: Library,
     settings: Settings,
     settings_path: Path = DEFAULT_SETTINGS_PATH,
 ) -> int:
@@ -486,8 +771,11 @@ def run(
         return 1
 
     try:
+
         def _main(stdscr: curses._CursesWindow) -> None:
-            player = Player3Column(catalog, settings, backend, settings_path=settings_path)
+            player = Player3Column(
+                library, settings, backend, settings_path=settings_path
+            )
             player.run_loop(stdscr)
 
         curses.wrapper(_main)

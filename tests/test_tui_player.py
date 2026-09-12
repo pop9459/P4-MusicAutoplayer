@@ -92,13 +92,14 @@ class TabletedPlayerSetupTests(unittest.TestCase):
 
         # Create settings
         settings = Settings(
-            catalog_path=Path("catalog.json"),
-            music_directory=Path("music"),
-            music_folders=(Path("music"),),
+            library_path=Path("data/library.json"),
             top_k=5,
             randomness=0.0,
             queue_length=10,
             max_consecutive_same_artist=3,
+            catalog_path=Path("catalog.json"),
+            music_directory=Path("music"),
+            music_folders=(Path("music"),),
         )
 
         # Mock the mpv backend

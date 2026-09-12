@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
+
+from .json_io import load_json, save_json
 
 try:
     import mutagen
@@ -129,9 +130,18 @@ def _canonicalize_artist(value: str | None) -> str:
     return cleaned or "unknown"
 
 
-def _track_id_from_path(path: Path) -> str:
+def _id_from_path(path: Path) -> str:
+    """Stable short id derived from a resolved filesystem path.
+
+    Shared by track ids here and folder ids in library.py -- both need the
+    same "same resolved path always yields the same id" property.
+    """
     digest = hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()
     return digest[:16]
+
+
+def _track_id_from_path(path: Path) -> str:
+    return _id_from_path(path)
 
 
 def _split_artist_title(stem: str) -> tuple[str, str]:
@@ -215,6 +225,7 @@ class TrackRecord:
     year: int | None = None
     enabled: bool = True
     feature_vector: list[float] = field(default_factory=list)
+    folder_id: str = ""
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TrackRecord":
@@ -230,6 +241,7 @@ class TrackRecord:
             year=_coerce_int(payload.get("year")),
             enabled=bool(payload.get("enabled", True)),
             feature_vector=[float(value) for value in feature_vector],
+            folder_id=str(payload.get("folder_id", "")),
         )
 
 
@@ -243,6 +255,11 @@ class Catalog:
     bpm_max: float | None
     year_min: int | None
     year_max: int | None
+    # Cached per-track feature-vector L2 norms, keyed by track id. Not
+    # persisted (see to_dict) -- it's a derived, in-memory-only speedup for
+    # predictor.rank_candidates_by_vector, which otherwise recomputes each
+    # track's norm on every ranking call (queue_length times per session).
+    track_norms: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "Catalog":
@@ -257,6 +274,7 @@ class Catalog:
             bpm_max=_coerce_float(feature_space.get("bpm_max")),
             year_min=_coerce_int(feature_space.get("year_min")),
             year_max=_coerce_int(feature_space.get("year_max")),
+            track_norms=_compute_track_norms(tracks),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -335,30 +353,59 @@ def _bpm_bounds(bpm_values: list[float]) -> tuple[float | None, float | None]:
     return bpm_min, bpm_max
 
 
-def scan_library(root: str | Path) -> list[TrackRecord]:
+def _scan_one(path: Path, folder_id: str = "") -> TrackRecord:
+    artist, title = _split_artist_title(path.stem)
+    tag_metadata = _read_tag_metadata(path)
+    return TrackRecord(
+        id=_track_id_from_path(path),
+        path=str(path.resolve()),
+        title=title,
+        artist=artist,
+        album=tag_metadata.get("album", ""),
+        genre=tag_metadata.get("genre", "unknown"),
+        bpm=tag_metadata.get("bpm"),
+        year=tag_metadata.get("year"),
+        enabled=True,
+        folder_id=folder_id,
+    )
+
+
+def _find_audio_files(root_path: Path) -> list[Path]:
+    return [
+        path
+        for path in sorted(root_path.rglob("*"))
+        if path.is_file() and path.suffix.lower() in SUPPORTED_AUDIO_EXTENSIONS
+    ]
+
+
+def scan_library(root: str | Path, *, folder_id: str = "") -> list[TrackRecord]:
     root_path = Path(root)
     if not root_path.exists():
         raise FileNotFoundError(f"Music library not found: {root_path}")
 
+    return [_scan_one(path, folder_id) for path in _find_audio_files(root_path)]
+
+
+def scan_library_with_progress(
+    root: str | Path,
+    *,
+    folder_id: str = "",
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> list[TrackRecord]:
+    """Same as scan_library, but reports (scanned, total) via progress_callback
+    after each file so a caller (e.g. a background thread) can surface scan
+    progress for a large folder instead of blocking silently."""
+    root_path = Path(root)
+    if not root_path.exists():
+        raise FileNotFoundError(f"Music library not found: {root_path}")
+
+    audio_files = _find_audio_files(root_path)
+    total = len(audio_files)
     tracks: list[TrackRecord] = []
-    for path in sorted(root_path.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in SUPPORTED_AUDIO_EXTENSIONS:
-            continue
-        artist, title = _split_artist_title(path.stem)
-        tag_metadata = _read_tag_metadata(path)
-        tracks.append(
-            TrackRecord(
-                id=_track_id_from_path(path),
-                path=str(path.resolve()),
-                title=title,
-                artist=artist,
-                album=tag_metadata.get("album", ""),
-                genre=tag_metadata.get("genre", "unknown"),
-                bpm=tag_metadata.get("bpm"),
-                year=tag_metadata.get("year"),
-                enabled=True,
-            )
-        )
+    for index, path in enumerate(audio_files, start=1):
+        tracks.append(_scan_one(path, folder_id))
+        if progress_callback is not None:
+            progress_callback(index, total)
     return tracks
 
 
@@ -405,6 +452,14 @@ def _build_feature_vector(
     return genre_vector + artist_vector + bpm_value + year_value
 
 
+def _compute_track_norms(tracks: Iterable[TrackRecord]) -> dict[str, float]:
+    return {
+        track.id: math.sqrt(sum(value * value for value in track.feature_vector))
+        for track in tracks
+        if track.feature_vector
+    }
+
+
 def build_catalog(tracks: Iterable[TrackRecord]) -> Catalog:
     track_list = list(tracks)
     genres, artists, bpm_min, bpm_max, year_min, year_max = _build_feature_space(track_list)
@@ -423,6 +478,7 @@ def build_catalog(tracks: Iterable[TrackRecord]) -> Catalog:
                 year=track.year,
                 enabled=track.enabled,
                 feature_vector=_build_feature_vector(track, genres, artists, bpm_min, bpm_max, year_min, year_max),
+                folder_id=track.folder_id,
             )
         )
 
@@ -435,19 +491,13 @@ def build_catalog(tracks: Iterable[TrackRecord]) -> Catalog:
         bpm_max=bpm_max,
         year_min=year_min,
         year_max=year_max,
+        track_norms=_compute_track_norms(enriched_tracks),
     )
 
 
 def load_catalog(path: str | Path) -> Catalog:
-    catalog_path = Path(path)
-    with catalog_path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    return Catalog.from_dict(payload)
+    return Catalog.from_dict(load_json(path))
 
 
 def save_catalog(catalog: Catalog, path: str | Path) -> None:
-    catalog_path = Path(path)
-    catalog_path.parent.mkdir(parents=True, exist_ok=True)
-    with catalog_path.open("w", encoding="utf-8") as handle:
-        json.dump(catalog.to_dict(), handle, indent=2, ensure_ascii=True)
-        handle.write("\n")
+    save_json(path, catalog.to_dict())
