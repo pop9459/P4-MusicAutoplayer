@@ -71,7 +71,23 @@ For `summary`, `list-tracks`, `inspect-track`, and `recommend`, a missing catalo
 python -m src.cli summary --catalog data/tracks.json --music-dir testTracks
 ```
 
-The current scanner obtains artist and title from filenames formatted as `Artist - Title.ext`. Embedded audio-tag extraction, BPM, year, and genre enrichment are not implemented yet, so those values are usually `unknown` in a freshly scanned catalog.
+The scanner obtains artist and title from filenames formatted as `Artist - Title.ext`, and reads `genre`, `year`, `album`, and `bpm` from embedded audio tags (via `mutagen`) when present, falling back to `unknown`/`None` if a file has no tags or can't be read. Genre tags are canonicalized into broad families (e.g. "classic rock", "album rock", "glam rock" → `rock`) so cross-artist similarity works even when raw tags are highly specific.
+
+### Feature weighting
+
+Track vectors combine four weighted blocks so genre/tempo/era drive similarity more than a raw artist match: `genre=0.35`, `bpm=0.25`, `year=0.20`, `artist=0.20` (see `FEATURE_WEIGHTS` in `src/track_analyzer.py`). Rebuild the catalog after upgrading so existing catalogs pick up real tag data and the new weighting.
+
+**Note:** a track that shares both genre *and* artist with the current track will still score a perfect match (cosine similarity 1.0) — this is mathematically unavoidable when every weighted dimension agrees. If a queue feels too repetitive within one artist/genre, raise `--top-k`/`--randomness` (or the `top_k`/`randomness` settings) so ties don't dominate the sampling pool.
+
+### Dependencies
+
+Install with:
+
+```bash
+pip install -r requirements.txt
+```
+
+On externally-managed systems (e.g. Arch/CachyOS), use `pip install --user --break-system-packages -r requirements.txt` or install into a virtualenv instead.
 
 ## Play (3-Column TUI Player)
 

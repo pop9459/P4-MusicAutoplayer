@@ -2,13 +2,38 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+try:
+    import mutagen
+except ImportError:  # pragma: no cover - exercised only when dependency missing
+    mutagen = None
+
 SUPPORTED_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".wav", ".ogg", ".aac"}
 CATALOG_VERSION = 1
+_YEAR_PATTERN = re.compile(r"(\d{4})")
+
+# Relative influence of each feature block on recommendation similarity.
+# Weights sum to 1.0. Each block's vector is scaled by sqrt(weight) before
+# concatenation, so its contribution to a cosine-similarity dot product
+# scales by exactly `weight`. Without this, one-hot genre/artist blocks
+# implicitly dominate over small 0..1 numeric features (bpm/year), and a
+# same-artist match alone can trivially produce near-maximal similarity.
+FEATURE_WEIGHTS = {
+    "genre": 0.35,
+    "bpm": 0.25,
+    "year": 0.20,
+    "artist": 0.20,
+}
+
+
+def _scale_block(values: list[float], weight: float) -> list[float]:
+    scale = math.sqrt(weight)
+    return [value * scale for value in values]
 
 
 def _normalize_text(value: str | None, default: str = "") -> str:
@@ -22,7 +47,8 @@ def canonicalize_genre(value: str | None) -> str:
     if not cleaned:
         return "unknown"
     cleaned = re.sub(r"[\s_]+", " ", cleaned)
-    alias_map = {
+
+    exact_alias_map = {
         "dance pop": "pop",
         "electro pop": "pop",
         "edm": "electronic",
@@ -31,7 +57,35 @@ def canonicalize_genre(value: str | None) -> str:
         "r and b": "r&b",
         "rnb": "r&b",
     }
-    return alias_map.get(cleaned, cleaned)
+    if cleaned in exact_alias_map:
+        return exact_alias_map[cleaned]
+
+    # Real-world genre tags are highly fragmented (e.g. "australian rock",
+    # "classic rock", "album rock" are all just "rock"). Without folding
+    # these into broad families, genre similarity can't bridge related
+    # artists tagged with slightly different strings, and content-based
+    # recommendations end up isolated to a single artist's exact tag.
+    # Checked in order from most to least specific so compound genres
+    # (e.g. "hip hop soul") resolve predictably.
+    keyword_families: list[tuple[str, tuple[str, ...]]] = [
+        ("hip-hop", ("hip hop", "hiphop", "rap", "trap")),
+        ("r&b", ("r&b", "r and b", "rnb", "soul")),
+        ("electronic", ("house", "edm", "electro", "techno", "trance", "dubstep", "dance", "big room")),
+        ("metal", ("metal",)),
+        ("rock", ("rock",)),
+        ("country", ("country",)),
+        ("reggae", ("reggae", "dancehall")),
+        ("latin", ("latin", "reggaeton", "salsa", "cumbia")),
+        ("folk", ("folk", "ludov", "heligonka")),
+        ("jazz", ("jazz",)),
+        ("classical", ("classical",)),
+        ("pop", ("pop",)),
+    ]
+    for canonical, keywords in keyword_families:
+        if any(keyword in cleaned for keyword in keywords):
+            return canonical
+
+    return cleaned
 
 
 def _canonicalize_artist(value: str | None) -> str:
@@ -50,6 +104,67 @@ def _split_artist_title(stem: str) -> tuple[str, str]:
         artist, title = parts
         return _normalize_text(artist, "unknown"), _normalize_text(title, stem)
     return "unknown", _normalize_text(stem, stem)
+
+
+def _parse_year_from_tag(value: str | None) -> int | None:
+    """Extract a 4-digit year from a tag value like '2014-04-04' or '2014'."""
+    if not value:
+        return None
+    match = _YEAR_PATTERN.search(value)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _parse_bpm_from_tag(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _read_tag_metadata(path: Path) -> dict[str, Any]:
+    """Read embedded genre/year/album/bpm tags, tolerating missing/corrupt data.
+
+    Returns a dict with keys 'genre', 'year', 'album', 'bpm' where each value
+    is present only if a usable tag was found; callers should fall back to
+    filename-derived defaults for any missing key.
+    """
+    result: dict[str, Any] = {}
+    if mutagen is None:
+        return result
+
+    try:
+        tags = mutagen.File(path, easy=True)
+    except Exception:
+        return result
+
+    if not tags:
+        return result
+
+    genre_values = tags.get("genre")
+    if genre_values:
+        result["genre"] = genre_values[0]
+
+    album_values = tags.get("album")
+    if album_values:
+        result["album"] = album_values[0]
+
+    date_values = tags.get("date")
+    if date_values:
+        year = _parse_year_from_tag(date_values[0])
+        if year is not None:
+            result["year"] = year
+
+    bpm_values = tags.get("bpm")
+    if bpm_values:
+        bpm = _parse_bpm_from_tag(bpm_values[0])
+        if bpm is not None:
+            result["bpm"] = bpm
+
+    return result
 
 
 @dataclass(slots=True)
@@ -159,16 +274,17 @@ def scan_library(root: str | Path) -> list[TrackRecord]:
         if not path.is_file() or path.suffix.lower() not in SUPPORTED_AUDIO_EXTENSIONS:
             continue
         artist, title = _split_artist_title(path.stem)
+        tag_metadata = _read_tag_metadata(path)
         tracks.append(
             TrackRecord(
                 id=_track_id_from_path(path),
                 path=str(path.resolve()),
                 title=title,
                 artist=artist,
-                album="",
-                genre="unknown",
-                bpm=None,
-                year=None,
+                album=tag_metadata.get("album", ""),
+                genre=tag_metadata.get("genre", "unknown"),
+                bpm=tag_metadata.get("bpm"),
+                year=tag_metadata.get("year"),
                 enabled=True,
             )
         )
@@ -203,11 +319,20 @@ def _build_feature_vector(
     artist = _canonicalize_artist(track.artist)
     genre_vector = [1.0 if genre == value else 0.0 for value in genres]
     artist_vector = [1.0 if artist == value else 0.0 for value in artists]
-    numeric_vector = [
-        _normalize_numeric(track.bpm, bpm_min, bpm_max),
-        _normalize_numeric(track.year, year_min, year_max),
-    ]
-    return genre_vector + artist_vector + numeric_vector
+    bpm_value = [_normalize_numeric(track.bpm, bpm_min, bpm_max)]
+    year_value = [_normalize_numeric(track.year, year_min, year_max)]
+
+    # Scale each block by sqrt(weight) so its contribution to a cosine-
+    # similarity dot product scales by exactly `weight`. Without this,
+    # concatenated one-hot blocks (genre/artist) implicitly dominate over
+    # small 0..1 numeric features, and "same artist" alone can trivially
+    # produce near-maximal similarity. See FEATURE_WEIGHTS.
+    genre_vector = _scale_block(genre_vector, FEATURE_WEIGHTS["genre"])
+    artist_vector = _scale_block(artist_vector, FEATURE_WEIGHTS["artist"])
+    bpm_value = _scale_block(bpm_value, FEATURE_WEIGHTS["bpm"])
+    year_value = _scale_block(year_value, FEATURE_WEIGHTS["year"])
+
+    return genre_vector + artist_vector + bpm_value + year_value
 
 
 def build_catalog(tracks: Iterable[TrackRecord]) -> Catalog:

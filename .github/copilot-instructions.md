@@ -2,7 +2,14 @@
 
 ## Build, test, and lint commands
 
-This is a standard-library Python project: no build step, dependency manifest, or lint configuration is committed.
+This project has one real dependency: `mutagen` (audio tag reading), listed in `requirements.txt`. No build step or lint configuration is committed.
+
+```bash
+pip install -r requirements.txt
+```
+
+On externally-managed environments (e.g. Arch/CachyOS), use
+`pip install --user --break-system-packages -r requirements.txt` or a virtualenv.
 
 ```bash
 # Run the complete test suite from the repository root.
@@ -18,7 +25,7 @@ python -m unittest tests.test_predictor.QueueGenerationTests.test_queue_chains_w
 ## Architecture
 
 ### Core Modules
-- `src/track_analyzer.py` owns the catalog format and preprocessing. It scans supported audio files, derives stable IDs from resolved paths, parses `Artist - Title.ext` filenames, canonicalizes metadata, constructs a shared feature space, and reads/writes versioned JSON catalogs.
+- `src/track_analyzer.py` owns the catalog format and preprocessing. It scans supported audio files, derives stable IDs from resolved paths, parses `Artist - Title.ext` filenames, reads embedded tags via `mutagen` (genre/year/album/bpm, with graceful fallback to filename-derived defaults on missing/unreadable tags), canonicalizes metadata (genre canonicalization uses an alias map plus an ordered keyword-family fallback so specific tags like "album rock"/"glam rock" collapse to `rock`), constructs a shared feature space with per-block weighting (`FEATURE_WEIGHTS`: genre 0.35, bpm 0.25, year 0.20, artist 0.20 — each block scaled by `sqrt(weight)` before concatenation), and reads/writes versioned JSON catalogs.
 - `src/predictor.py` is the pure recommender core. It ranks catalog vectors by cosine similarity, filters ineligible/current/excluded tracks, chooses from top-k with optional weighted randomness, and generates no-repeat queues.
 - `src/settings.py` validates version-1 `settings.json` files, supports `music_folders` array with backward compatibility for single `music_directory`, and resolves relative paths against the settings file's directory.
 - `src/cli.py` wires settings, catalog creation/loading, and recommender operations into the `python -m src.cli` commands. Explicit command-line options override settings values; commands can build a missing catalog only when a music directory is available. The `play` command launches the new 3-column TUI.

@@ -3,6 +3,6 @@
   "catalog_path": "testTracks/catalog.json",
   "music_directory": "testTracks",
   "top_k": 5,
-  "randomness": 0.0,
+  "randomness": 0.8,
   "queue_length": 50
 }
