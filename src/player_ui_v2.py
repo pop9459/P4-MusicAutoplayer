@@ -17,6 +17,16 @@ from .track_analyzer import Catalog, TrackRecord
 
 POLL_INTERVAL_MS = 200
 
+# Color pair IDs. Initialized lazily in _init_colors() (only once a real
+# curses screen is running) rather than in __init__, since Player3Column is
+# constructed directly (no curses.wrapper) throughout the test suite.
+COLOR_FOCUSED = 1
+COLOR_UNFOCUSED = 2
+COLOR_HEADER = 3
+COLOR_QUEUE_HEAD = 4
+COLOR_PLAYER_BAR = 5
+COLOR_PROGRESS = 6
+
 
 class Player3Column:
     """3-column layout: folders | songs | queue + bottom player bar."""
@@ -39,12 +49,48 @@ class Player3Column:
         self.engine: PlayerEngine | None = None
         self.active_column = 0  # 0=folders, 1=songs, 2=queue
 
+        self._colors_ready = False
+        self._has_colors = False
+
         # Init folder panel
         self.folder_panel.load_folders_from_settings(settings)
         if self.folder_panel.selected_folder:
             self.songs_panel.load_songs_from_catalog(catalog)
             if self.songs_panel.songs:
                 self._init_engine_with_song(self.songs_panel.songs[0])
+
+    def _init_colors(self) -> None:
+        """Set up color pairs. Only safe to call once a real curses screen
+        is running (curses.start_color() errors without one), so this is
+        invoked lazily from _render_layout rather than __init__."""
+        self._has_colors = curses.has_colors()
+        if self._has_colors:
+            curses.start_color()
+            curses.use_default_colors()
+            curses.init_pair(COLOR_FOCUSED, curses.COLOR_BLACK, curses.COLOR_CYAN)
+            curses.init_pair(COLOR_UNFOCUSED, curses.COLOR_WHITE, curses.COLOR_BLUE)
+            curses.init_pair(COLOR_HEADER, curses.COLOR_YELLOW, -1)
+            curses.init_pair(COLOR_QUEUE_HEAD, curses.COLOR_GREEN, -1)
+            curses.init_pair(COLOR_PLAYER_BAR, curses.COLOR_BLACK, curses.COLOR_GREEN)
+            curses.init_pair(COLOR_PROGRESS, curses.COLOR_GREEN, -1)
+        self._colors_ready = True
+
+    def _cursor_attr(self, column: int) -> int:
+        """Highlight attribute for a selected row in `column`, distinguishing
+        the focused (active) column from an unfocused one so the user can
+        always tell which column has keyboard focus."""
+        focused = self.active_column == column
+        if not self._has_colors:
+            return curses.A_STANDOUT if focused else curses.A_REVERSE
+        return (curses.color_pair(COLOR_FOCUSED) | curses.A_BOLD) if focused else curses.color_pair(COLOR_UNFOCUSED)
+
+    def _header_attr(self, column: int) -> int:
+        """Highlight attribute for a column header, accenting the focused column."""
+        if self.active_column != column:
+            return curses.A_BOLD
+        if not self._has_colors:
+            return curses.A_BOLD | curses.A_UNDERLINE
+        return curses.color_pair(COLOR_HEADER) | curses.A_BOLD
 
     def _init_engine_with_song(self, track: TrackRecord) -> None:
         """Initialize player engine with starting track."""
@@ -183,6 +229,9 @@ class Player3Column:
 
     def _render_layout(self, stdscr: curses._CursesWindow) -> None:
         """Render full 3-column layout."""
+        if not self._colors_ready:
+            self._init_colors()
+
         stdscr.erase()
         height, width = stdscr.getmaxyx()
 
@@ -215,11 +264,11 @@ class Player3Column:
 
     def _render_folders(self, stdscr: curses._CursesWindow, row: int, col: int, width: int, height: int) -> None:
         """Render folder list."""
-        stdscr.addnstr(row, col, "Folders".ljust(width - 1), width - 1, curses.A_BOLD)
+        stdscr.addnstr(row, col, "Folders".ljust(width - 1), width - 1, self._header_attr(0))
         row += 1
 
         for i, folder in enumerate(self.folder_panel.folders):
-            attr = curses.A_STANDOUT if i == self.folder_panel.selected_index else curses.A_NORMAL
+            attr = self._cursor_attr(0) if i == self.folder_panel.selected_index else curses.A_NORMAL
             name = folder.name
             stdscr.addnstr(row, col, f"  {name}".ljust(width - 1)[:width - 1], width - 1, attr)
             row += 1
@@ -228,7 +277,7 @@ class Player3Column:
 
     def _render_songs(self, stdscr: curses._CursesWindow, row: int, col: int, width: int, height: int) -> None:
         """Render song list."""
-        stdscr.addnstr(row, col, "Songs".ljust(width - 1), width - 1, curses.A_BOLD)
+        stdscr.addnstr(row, col, "Songs".ljust(width - 1), width - 1, self._header_attr(1))
         row += 1
 
         # Random button: fixed row, always visible above the scrollable list.
@@ -237,18 +286,19 @@ class Player3Column:
         row += 1
 
         for track, idx, is_selected in self.songs_panel.get_visible_songs(height - 3):
-            attr = curses.A_STANDOUT if is_selected else curses.A_NORMAL
+            attr = self._cursor_attr(1) if is_selected else curses.A_NORMAL
             line = f"{idx + 1}. {track.title}"[:width - 1]
             stdscr.addnstr(row, col, line.ljust(width - 1), width - 1, attr)
             row += 1
 
     def _render_queue(self, stdscr: curses._CursesWindow, row: int, col: int, width: int, height: int) -> None:
         """Render upcoming queue."""
-        stdscr.addnstr(row, col, f"Queue ({len(self.queue_panel.queue)})".ljust(width - 1)[:width - 1], width - 1, curses.A_BOLD)
+        stdscr.addnstr(row, col, f"Queue ({len(self.queue_panel.queue)})".ljust(width - 1)[:width - 1], width - 1, self._header_attr(2))
         row += 1
 
+        head_attr = (curses.color_pair(COLOR_QUEUE_HEAD) | curses.A_BOLD) if self._has_colors else curses.A_BOLD
         for track, _, is_first in self.queue_panel.get_visible_queue(height - 2):
-            attr = curses.A_BOLD if is_first else curses.A_NORMAL
+            attr = head_attr if is_first else curses.A_NORMAL
             line = f"{track.artist} - {track.title}"[:width - 1]
             stdscr.addnstr(row, col, line.ljust(width - 1), width - 1, attr)
             row += 1
@@ -259,8 +309,9 @@ class Player3Column:
         track_display = self.player_bar.get_track_display()
         controls = "[Space]Play/Pause  [N]ext  [R]andom  [Q]uit"
 
+        bar_attr = curses.color_pair(COLOR_PLAYER_BAR) if self._has_colors else curses.A_REVERSE
         line = f"[{state}] {track_display} | {controls}"[:width - 1]
-        stdscr.addnstr(row, 0, line.ljust(width - 1), width - 1, curses.A_REVERSE)
+        stdscr.addnstr(row, 0, line.ljust(width - 1), width - 1, bar_attr)
 
         if self.player_bar.status_message:
             stdscr.addnstr(row + 1, 0, self.player_bar.status_message.ljust(width - 1)[:width - 1], width - 1, curses.A_DIM)

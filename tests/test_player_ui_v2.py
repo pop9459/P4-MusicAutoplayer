@@ -1,6 +1,7 @@
 """Integration tests for v2 3-column player."""
 from __future__ import annotations
 
+import curses
 import re
 import unittest
 from pathlib import Path
@@ -224,6 +225,72 @@ class SongsRenderTests(unittest.TestCase):
 
         self.assertEqual(row_no_scroll, row_scrolled)
         self.assertEqual(row_no_scroll, 1)  # directly under the "Songs" header
+
+
+class ColorAndFocusTests(unittest.TestCase):
+    """Issue #2: real colors, and the cursor must show which column has focus."""
+
+    def setUp(self) -> None:
+        self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.settings = load_settings()
+        self.backend = MagicMock(spec=MpvBackend)
+
+    def test_colors_not_initialized_on_construction(self) -> None:
+        # curses.start_color()/init_pair() require a live curses screen, and
+        # Player3Column is constructed directly (no curses.wrapper) in every
+        # other test here, so color setup must stay lazy.
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        self.assertFalse(player._colors_ready)
+
+    def test_cursor_attr_without_color_support_falls_back_to_legacy_attrs(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        with patch("curses.has_colors", return_value=False):
+            player._init_colors()
+
+        player.active_column = 0
+        self.assertEqual(player._cursor_attr(0), curses.A_STANDOUT)
+        self.assertEqual(player._cursor_attr(1), curses.A_REVERSE)
+
+    def _init_colors_without_real_screen(self, player: Player3Column) -> None:
+        """curses.start_color()/init_pair()/color_pair() all require
+        initscr() to have run; the test suite never runs a real screen, so
+        stub those calls out (has_colors=True, color_pair returning a
+        distinguishable int per pair id) while exercising our own
+        color-pair-selection logic in _cursor_attr/_header_attr. Patches are
+        kept active for the rest of the test via enterContext."""
+        self.enterContext(patch("curses.has_colors", return_value=True))
+        self.enterContext(patch("curses.start_color"))
+        self.enterContext(patch("curses.use_default_colors"))
+        self.enterContext(patch("curses.init_pair"))
+        self.enterContext(patch("curses.color_pair", side_effect=lambda pair_id: pair_id * 100))
+        player._init_colors()
+
+    def test_focused_and_unfocused_cursor_attrs_differ(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        self._init_colors_without_real_screen(player)
+
+        player.active_column = 0
+        focused_attr = player._cursor_attr(0)
+        unfocused_attr = player._cursor_attr(1)
+        self.assertNotEqual(focused_attr, unfocused_attr)
+
+    def test_render_folders_highlights_selected_row_only_when_focused(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        self._init_colors_without_real_screen(player)
+        if len(player.folder_panel.folders) < 1:
+            self.skipTest("no folders in test catalog")
+
+        player.active_column = 0
+        stdscr = FakeStdscr()
+        player._render_folders(stdscr, row=0, col=0, width=20, height=10)
+        focused_attrs = {attr for _r, _c, _t, attr in stdscr.calls}
+
+        player.active_column = 2  # folders no longer focused
+        stdscr = FakeStdscr()
+        player._render_folders(stdscr, row=0, col=0, width=20, height=10)
+        unfocused_attrs = {attr for _r, _c, _t, attr in stdscr.calls}
+
+        self.assertNotEqual(focused_attrs, unfocused_attrs)
 
 
 if __name__ == "__main__":
