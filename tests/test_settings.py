@@ -86,3 +86,82 @@ class ExplicitCliArgumentsTests(unittest.TestCase):
                     "--randomness", "0.0",
                 ]), 0)
             self.assertIn("Generated 1 of 1 requested queue tracks.", output.getvalue())
+
+
+class SettingsMigrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+        self.settings_path = self.root / "settings.json"
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def test_backward_compatibility_music_directory_migrates_to_folders(self) -> None:
+        self.settings_path.write_text(json.dumps({
+            "version": 1,
+            "catalog_path": "catalog.json",
+            "music_directory": "music",
+            "top_k": 1,
+            "randomness": 0.0,
+            "queue_length": 1,
+        }), encoding="utf-8")
+
+        settings = load_settings(self.settings_path)
+
+        self.assertEqual(settings.music_directory, self.root / "music")
+        self.assertIsNotNone(settings.music_folders)
+        self.assertEqual(settings.music_folders, (self.root / "music",))
+
+    def test_load_settings_with_music_folders_array(self) -> None:
+        self.settings_path.write_text(json.dumps({
+            "version": 1,
+            "catalog_path": "catalog.json",
+            "music_directory": "music",
+            "music_folders": ["music", "more_music"],
+            "top_k": 1,
+            "randomness": 0.0,
+            "queue_length": 1,
+        }), encoding="utf-8")
+
+        settings = load_settings(self.settings_path)
+
+        self.assertEqual(settings.music_directory, self.root / "music")
+        self.assertIsNotNone(settings.music_folders)
+        self.assertEqual(settings.music_folders, (self.root / "music", self.root / "more_music"))
+
+    def test_save_and_reload_preserves_music_folders(self) -> None:
+        from src.settings import save_settings
+        self.settings_path.write_text(json.dumps({
+            "version": 1,
+            "catalog_path": "catalog.json",
+            "music_directory": "music",
+            "top_k": 1,
+            "randomness": 0.0,
+            "queue_length": 1,
+        }), encoding="utf-8")
+
+        settings = load_settings(self.settings_path)
+        save_settings(settings, self.settings_path)
+        reloaded = load_settings(self.settings_path)
+
+        self.assertEqual(reloaded.music_directory, settings.music_directory)
+        self.assertEqual(reloaded.music_folders, settings.music_folders)
+
+    def test_with_music_directory_creates_new_settings(self) -> None:
+        self.settings_path.write_text(json.dumps({
+            "version": 1,
+            "catalog_path": "catalog.json",
+            "music_directory": "music",
+            "top_k": 1,
+            "randomness": 0.0,
+            "queue_length": 1,
+        }), encoding="utf-8")
+
+        settings = load_settings(self.settings_path)
+        new_path = self.root / "new_music"
+        updated = settings.with_music_directory(new_path)
+
+        self.assertEqual(updated.music_directory, new_path)
+        self.assertEqual(updated.music_folders, (new_path,))
+        self.assertEqual(updated.top_k, settings.top_k)

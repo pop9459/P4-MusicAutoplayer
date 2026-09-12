@@ -10,7 +10,7 @@ A local, offline music recommender that selects a next track using a JSON catalo
 {
   "version": 1,
   "catalog_path": "testTracks/catalog.json",
-  "music_directory": "testTracks",
+  "music_folders": ["testTracks"],
   "top_k": 5,
   "randomness": 0.0,
   "queue_length": 10
@@ -18,6 +18,8 @@ A local, offline music recommender that selects a next track using a JSON catalo
 ```
 
 Edit these values to change normal behavior without repeatedly passing flags. Paths are resolved relative to the settings file. Use a different file with `--settings path/to/settings.json` before the command; explicit CLI flags such as `--length` and `--randomness` override settings for that one run.
+
+**Note:** Legacy single `music_directory` is automatically migrated to `music_folders` array on first load.
 
 ## Debug CLI
 
@@ -71,27 +73,55 @@ python -m src.cli summary --catalog data/tracks.json --music-dir testTracks
 
 The current scanner obtains artist and title from filenames formatted as `Artist - Title.ext`. Embedded audio-tag extraction, BPM, year, and genre enrichment are not implemented yet, so those values are usually `unknown` in a freshly scanned catalog.
 
-## Play (demo TUI)
+## Play (3-Column TUI Player)
 
-A minimal full-screen terminal player demonstrates the recommender end to end: pick a starting track, then play continuously as the recommender queues up (and, once exhausted, regenerates) the next tracks.
+Interactive terminal player with 3-column layout: folders (left), songs (middle), queue (right), and player bar (bottom).
 
-Requires [mpv](https://mpv.io/) installed and on `PATH` (used only as a background audio backend; no mpv window/video is shown).
+Requires [mpv](https://mpv.io/) installed and on `PATH`.
 
 ```bash
 python -m src.cli play
-python -m src.cli play --track-id <track-id>
-python -m src.cli play --catalog data/tracks.json --length 20 --randomness 0.25
+python -m src.cli play --catalog data/tracks.json
 ```
 
-If `--track-id` is omitted, an interactive picker lists all enabled tracks; use the arrow keys (or `j`/`k`) and Enter to choose a starting track, or `q` to quit the picker.
+### Layout
 
-Keys during playback:
+```
+Folders      │ Songs        │ Queue       
+folder-1     │ 1. Song A    │ 1. Song X   
+folder-2 ◀   │ 2. Song B ◀  │ 2. Song Y   
+folder-3     │ [R] Random   │            
+             │              │            
+[Play] Song B | [Space]Play/Pause [N]ext [R]andom [Q]uit
+```
 
-| Key           | Action                              |
-|---------------|--------------------------------------|
-| `p` / `space` | Play / pause                        |
-| `n`           | Skip to the next queued track       |
-| `l`           | Toggle the upcoming-queue view      |
-| `q`           | Quit                                 |
+### Controls
 
-`--catalog`, `--music-dir`, `--top-k`, `--randomness`, and `--length` behave the same as for `recommend`/`queue`, including falling back to `settings.json` when omitted. When the queue runs out, a new one is generated automatically from the last played track and playback continues without interruption.
+**Folder Column (left)**
+- `↑` / `k` — Previous folder
+- `↓` / `j` — Next folder
+- `Tab` — Move to songs column
+- `Enter` / `Space` — Load and play first song
+
+**Songs Column (middle)**
+- `↑` / `k` — Previous song
+- `↓` / `j` — Next song
+- `Enter` — Play selected song
+- `r` / `R` — Play random song from folder
+- `Tab` — Move to queue column
+- `Space` / `p` — Play / pause
+
+**Queue Column (right)**
+- `↑` / `k` — Scroll up
+- `↓` / `j` — Scroll down
+- `Tab` — Move to folders column
+- `Space` / `p` — Play / pause
+- `n` / `N` — Skip to next
+
+**Global**
+- `q` / `Q` — Quit
+- `Space` — Play / pause (any column)
+- `n` / `N` — Skip to next (any column)
+- `r` / `R` — Play random (songs column only)
+
+The app starts with the main layout. Select a folder, then a song to begin playback. Random play picks an enabled track from the current folder.

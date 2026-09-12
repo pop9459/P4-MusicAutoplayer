@@ -6,6 +6,3 @@ testTracks/*
 # Generated Python bytecode.
 __pycache__/
 *.py[cod]
-
-# Local Copilot configuration.
-.github/

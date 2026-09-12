@@ -13,9 +13,15 @@ DEFAULT_SETTINGS_PATH = Path("settings.json")
 class Settings:
     catalog_path: Path
     music_directory: Path
+    music_folders: tuple[Path, ...] | None
     top_k: int
     randomness: float
     queue_length: int
+
+    def with_music_directory(self, new_directory: Path) -> Settings:
+        """Return a new Settings with updated music_directory and folders."""
+        from dataclasses import replace
+        return replace(self, music_directory=new_directory, music_folders=(new_directory,))
 
 
 def _require_string(payload: dict[str, Any], name: str) -> str:
@@ -37,6 +43,26 @@ def _require_randomness(payload: dict[str, Any]) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= float(value) <= 1.0:
         raise ValueError("Settings field 'randomness' must be a number from 0.0 to 1.0")
     return float(value)
+
+
+def _migrate_music_directory_to_folders(music_directory: str, settings_path: Path) -> tuple[Path, ...]:
+    """Convert single music_directory to music_folders array for backward compatibility."""
+    return (_resolve_path(music_directory, settings_path),)
+
+
+def _load_music_folders(payload: dict[str, Any], settings_path: Path) -> tuple[Path, ...]:
+    """Load music_folders if present; otherwise migrate from music_directory."""
+    if "music_folders" in payload:
+        folders = payload.get("music_folders")
+        if not isinstance(folders, list) or not folders:
+            raise ValueError("Settings field 'music_folders' must be a non-empty list of strings")
+        resolved = tuple(_resolve_path(folder, settings_path) for folder in folders if isinstance(folder, str))
+        if not resolved:
+            raise ValueError("Settings field 'music_folders' must contain valid folder paths")
+        return resolved
+    # Backward compatibility: migrate music_directory to folders
+    music_dir = _require_string(payload, "music_directory")
+    return _migrate_music_directory_to_folders(music_dir, settings_path)
 
 
 def _resolve_path(value: str, settings_path: Path) -> Path:
@@ -61,10 +87,43 @@ def load_settings(path: str | Path = DEFAULT_SETTINGS_PATH) -> Settings:
     if payload.get("version") != SETTINGS_VERSION:
         raise ValueError(f"Settings field 'version' must be {SETTINGS_VERSION}")
 
+    music_folders = _load_music_folders(payload, settings_path)
+    music_directory = music_folders[0]
+
     return Settings(
         catalog_path=_resolve_path(_require_string(payload, "catalog_path"), settings_path),
-        music_directory=_resolve_path(_require_string(payload, "music_directory"), settings_path),
+        music_directory=music_directory,
+        music_folders=music_folders,
         top_k=_require_positive_int(payload, "top_k"),
         randomness=_require_randomness(payload),
         queue_length=_require_positive_int(payload, "queue_length"),
     )
+
+
+def save_settings(settings: Settings, path: str | Path = DEFAULT_SETTINGS_PATH) -> None:
+    """Save settings back to JSON file, preserving music_folders if present."""
+    settings_path = Path(path)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Resolve paths relative to settings file for storage
+    def _relative_path(p: Path) -> str:
+        try:
+            return str(p.relative_to(settings_path.parent))
+        except ValueError:
+            return str(p)
+
+    payload = {
+        "version": SETTINGS_VERSION,
+        "catalog_path": _relative_path(settings.catalog_path),
+        "music_directory": _relative_path(settings.music_directory),
+        "top_k": settings.top_k,
+        "randomness": settings.randomness,
+        "queue_length": settings.queue_length,
+    }
+
+    if settings.music_folders and len(settings.music_folders) > 1:
+        payload["music_folders"] = [_relative_path(folder) for folder in settings.music_folders]
+
+    with settings_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=True)
+        handle.write("\n")

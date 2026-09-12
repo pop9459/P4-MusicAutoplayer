@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from . import player
+from . import tui_player
+from . import player_ui_v2
 from .predictor import generate_queue, rank_candidates, recommend_next_track
 from .settings import DEFAULT_SETTINGS_PATH, Settings, load_settings
 from .track_analyzer import Catalog, TrackRecord, build_catalog, load_catalog, save_catalog, scan_library
@@ -135,15 +137,9 @@ def _command_queue(args: argparse.Namespace) -> None:
         print(f"{index}. {_format_track(track)}")
 
 
-def _command_play(args: argparse.Namespace) -> None:
+def _command_play(args: argparse.Namespace, settings: Settings) -> None:
     catalog = _load_or_build_catalog(args.catalog, args.music_dir)
-    exit_code = player.run(
-        catalog,
-        top_k=args.top_k,
-        randomness=args.randomness,
-        queue_length=args.length,
-        start_track_id=args.track_id,
-    )
+    exit_code = player_ui_v2.run(catalog, settings)
     if exit_code:
         raise SystemExit(exit_code)
 
@@ -234,10 +230,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        settings = None
         if _needs_settings(args):
-            _apply_settings_defaults(args, load_settings(args.settings or DEFAULT_SETTINGS_PATH))
-        handler: Callable[[argparse.Namespace], None] = args.handler
-        handler(args)
+            settings = load_settings(args.settings or DEFAULT_SETTINGS_PATH)
+            _apply_settings_defaults(args, settings)
+        handler: Callable = args.handler
+        if args.command == "play" and settings is not None:
+            handler(args, settings)
+        else:
+            handler(args)
     except (FileNotFoundError, ValueError) as error:
         parser.error(str(error))
     return 0
