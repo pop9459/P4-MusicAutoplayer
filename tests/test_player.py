@@ -111,5 +111,44 @@ class PlayerEngineTests(unittest.TestCase):
         self.assertIsNone(engine.advance())
 
 
+def _max_consecutive_run(values: list[str]) -> int:
+    longest = 0
+    current = 0
+    previous = None
+    for value in values:
+        current = current + 1 if value == previous else 1
+        longest = max(longest, current)
+        previous = value
+    return longest
+
+
+class ArtistRepeatCapTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # One artist dominates the library, so both the initial queue
+        # (generate_queue, via _refill_if_needed) and later top-ups
+        # (recommend_next_track, via _top_up_queue) would otherwise queue
+        # up many of its tracks in a row.
+        acdc_tracks = [
+            TrackRecord(id=f"acdc{i}", path=f"/acdc{i}.mp3", title=f"ACDC {i}", artist="ACDC", genre="rock", bpm=120 + i, year=1980 + i)
+            for i in range(10)
+        ]
+        other_tracks = [
+            TrackRecord(id="queenA", path="/queenA.mp3", title="Queen A", artist="Queen", genre="rock", bpm=121, year=1981),
+            TrackRecord(id="queenB", path="/queenB.mp3", title="Queen B", artist="Queen", genre="rock", bpm=122, year=1982),
+            TrackRecord(id="kissA", path="/kissA.mp3", title="Kiss A", artist="Kiss", genre="rock", bpm=123, year=1983),
+        ]
+        self.catalog = build_catalog(acdc_tracks + other_tracks)
+        self.start_track = next(track for track in self.catalog.tracks if track.id == "acdc0")
+
+    def test_cap_holds_across_refill_and_top_up(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=10, randomness=0.0, queue_length=4)
+        self.assertLessEqual(_max_consecutive_run([t.artist for t in engine.queue]), 3)
+
+        for _ in range(6):
+            engine.advance()
+            timeline = [self.start_track.artist] + [t.artist for t in engine.history[1:]] + [t.artist for t in engine.queue]
+            self.assertLessEqual(_max_consecutive_run(timeline), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

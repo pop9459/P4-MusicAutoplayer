@@ -4,5 +4,6 @@
   "music_directory": "testTracks",
   "top_k": 5,
   "randomness": 0.8,
-  "queue_length": 50
+  "queue_length": 50,
+  "max_consecutive_same_artist": 3
 }

@@ -35,6 +35,7 @@ class TabletedPlayer:
             top_k=settings.top_k,
             randomness=settings.randomness,
             queue_length=settings.queue_length,
+            max_consecutive_same_artist=settings.max_consecutive_same_artist,
         )
         self.ui_manager = UIManager()
 
@@ -244,6 +245,7 @@ class TabletedPlayer:
                 randomness=new_randomness,
                 queue_length=new_queue_length,
                 rng=random.Random(),
+                max_consecutive_same_artist=self.settings.max_consecutive_same_artist,
             )
 
             self.ui_manager.state.status_message = "Settings saved."

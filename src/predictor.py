@@ -42,6 +42,41 @@ def rank_candidates_by_vector(
     return candidates
 
 
+def _trailing_artist_streak(recent_artists: Sequence[str]) -> tuple[str | None, int]:
+    if not recent_artists:
+        return None, 0
+    last_artist = recent_artists[-1]
+    streak = 0
+    for artist in reversed(recent_artists):
+        if artist != last_artist:
+            break
+        streak += 1
+    return last_artist, streak
+
+
+def _apply_artist_repeat_cap(
+    ranked_candidates: Sequence[tuple[TrackRecord, float]],
+    recent_artists: Sequence[str],
+    max_consecutive_same_artist: int | None,
+) -> Sequence[tuple[TrackRecord, float]]:
+    """Drop candidates that would extend a same-artist run past the cap.
+
+    A track sharing both genre and artist with the current track scores a
+    perfect cosine match, so pure similarity ranking can queue up many
+    tracks by the same artist in a row. This is a queue-assembly filter
+    (like the existing no-repeat-track exclusion), not a scoring change.
+    Falls back to the unfiltered list if the cap would empty the pool
+    (e.g. a single-artist library), so playback never stalls.
+    """
+    if not max_consecutive_same_artist or max_consecutive_same_artist < 1:
+        return ranked_candidates
+    streak_artist, streak_length = _trailing_artist_streak(recent_artists)
+    if streak_artist is None or streak_length < max_consecutive_same_artist:
+        return ranked_candidates
+    filtered = [item for item in ranked_candidates if item[0].artist != streak_artist]
+    return filtered or ranked_candidates
+
+
 def rank_candidates(
     current_track_id: str,
     catalog: Catalog,
@@ -92,8 +127,11 @@ def recommend_next_track(
     randomness: float = 0.0,
     rng: random.Random | None = None,
     excluded_track_ids: Collection[str] = (),
+    recent_artists: Sequence[str] = (),
+    max_consecutive_same_artist: int | None = None,
 ) -> TrackRecord:
     ranked_candidates = rank_candidates(current_track_id, catalog, excluded_track_ids)
+    ranked_candidates = _apply_artist_repeat_cap(ranked_candidates, recent_artists, max_consecutive_same_artist)
     if top_k > 0:
         ranked_candidates = ranked_candidates[:top_k]
     return _sample_weighted_candidates(ranked_candidates, randomness, rng or random.Random())
@@ -125,6 +163,7 @@ def generate_queue(
     top_k: int = 5,
     randomness: float = 0.0,
     rng: random.Random | None = None,
+    max_consecutive_same_artist: int | None = 3,
 ) -> list[TrackRecord]:
     if length < 1:
         raise ValueError("Queue length must be at least 1")
@@ -140,10 +179,12 @@ def generate_queue(
     played_track_ids = {current_track_id}
     queue: list[TrackRecord] = []
     previous_vector = seed_vector
+    recent_artists = [seed_track.artist]
 
     for _ in range(length):
         reference_vector = _blend_vectors(previous_vector, seed_vector, 1.0 - SEED_ANCHOR_WEIGHT)
         ranked_candidates = rank_candidates_by_vector(reference_vector, catalog, played_track_ids)
+        ranked_candidates = _apply_artist_repeat_cap(ranked_candidates, recent_artists, max_consecutive_same_artist)
         if top_k > 0:
             ranked_candidates = ranked_candidates[:top_k]
         if not ranked_candidates:
@@ -151,6 +192,7 @@ def generate_queue(
         next_track = _sample_weighted_candidates(ranked_candidates, randomness, random_generator)
         queue.append(next_track)
         played_track_ids.add(next_track.id)
+        recent_artists.append(next_track.artist)
         previous_vector = next_track.feature_vector
 
     return queue
@@ -163,6 +205,7 @@ def generate_queue_from_json(
     top_k: int = 5,
     randomness: float = 0.0,
     rng: random.Random | None = None,
+    max_consecutive_same_artist: int | None = 3,
 ) -> list[TrackRecord]:
     catalog = load_catalog(catalog_path)
-    return generate_queue(current_track_id, catalog, length, top_k, randomness, rng)
+    return generate_queue(current_track_id, catalog, length, top_k, randomness, rng, max_consecutive_same_artist)

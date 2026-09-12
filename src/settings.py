@@ -7,6 +7,7 @@ from typing import Any
 
 SETTINGS_VERSION = 1
 DEFAULT_SETTINGS_PATH = Path("settings.json")
+DEFAULT_MAX_CONSECUTIVE_SAME_ARTIST = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +18,7 @@ class Settings:
     top_k: int
     randomness: float
     queue_length: int
+    max_consecutive_same_artist: int | None
 
     def with_music_directory(self, new_directory: Path) -> Settings:
         """Return a new Settings with updated music_directory and folders."""
@@ -43,6 +45,22 @@ def _require_randomness(payload: dict[str, Any]) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= float(value) <= 1.0:
         raise ValueError("Settings field 'randomness' must be a number from 0.0 to 1.0")
     return float(value)
+
+
+def _load_max_consecutive_same_artist(payload: dict[str, Any]) -> int | None:
+    """Optional cap on same-artist tracks in a row; absent/null disables it.
+
+    New field with a default, so existing settings.json files without it
+    keep working (unlike top_k/randomness/queue_length, which are required).
+    """
+    if "max_consecutive_same_artist" not in payload:
+        return DEFAULT_MAX_CONSECUTIVE_SAME_ARTIST
+    value = payload.get("max_consecutive_same_artist")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("Settings field 'max_consecutive_same_artist' must be a positive integer or null")
+    return value
 
 
 def _migrate_music_directory_to_folders(music_directory: str, settings_path: Path) -> tuple[Path, ...]:
@@ -97,6 +115,7 @@ def load_settings(path: str | Path = DEFAULT_SETTINGS_PATH) -> Settings:
         top_k=_require_positive_int(payload, "top_k"),
         randomness=_require_randomness(payload),
         queue_length=_require_positive_int(payload, "queue_length"),
+        max_consecutive_same_artist=_load_max_consecutive_same_artist(payload),
     )
 
 
@@ -119,6 +138,7 @@ def save_settings(settings: Settings, path: str | Path = DEFAULT_SETTINGS_PATH) 
         "top_k": settings.top_k,
         "randomness": settings.randomness,
         "queue_length": settings.queue_length,
+        "max_consecutive_same_artist": settings.max_consecutive_same_artist,
     }
 
     if settings.music_folders and len(settings.music_folders) > 1:

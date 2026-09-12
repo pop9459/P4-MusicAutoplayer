@@ -70,5 +70,56 @@ class QueueSeedAnchoringTests(unittest.TestCase):
         self.assertGreater(anchored_final_similarity, unanchored_final_similarity)
 
 
+def _max_consecutive_run(values: list[str]) -> int:
+    longest = 0
+    current = 0
+    previous = None
+    for value in values:
+        current = current + 1 if value == previous else 1
+        longest = max(longest, current)
+        previous = value
+    return longest
+
+
+class ArtistRepeatCapTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # One artist dominates the library (ACDC), so pure similarity
+        # ranking would otherwise queue up many of its tracks in a row.
+        acdc_tracks = [
+            TrackRecord(id=f"acdc{i}", path=f"/acdc{i}.mp3", title=f"ACDC {i}", artist="ACDC", genre="rock", bpm=120 + i, year=1980 + i)
+            for i in range(6)
+        ]
+        other_tracks = [
+            TrackRecord(id="queenA", path="/queenA.mp3", title="Queen A", artist="Queen", genre="rock", bpm=121, year=1981),
+            TrackRecord(id="queenB", path="/queenB.mp3", title="Queen B", artist="Queen", genre="rock", bpm=122, year=1982),
+            TrackRecord(id="kissA", path="/kissA.mp3", title="Kiss A", artist="Kiss", genre="rock", bpm=123, year=1983),
+        ]
+        self.catalog = build_catalog(acdc_tracks + other_tracks)
+
+    def test_default_cap_prevents_more_than_three_in_a_row(self) -> None:
+        queue = generate_queue("acdc0", self.catalog, length=8, top_k=10, randomness=0.0)
+        artists = [track.artist for track in queue]
+
+        self.assertLessEqual(_max_consecutive_run(artists), 3)
+
+    def test_disabling_the_cap_reproduces_uncapped_behavior(self) -> None:
+        queue = generate_queue("acdc0", self.catalog, length=8, top_k=10, randomness=0.0, max_consecutive_same_artist=None)
+        artists = [track.artist for track in queue]
+
+        # Without a cap, pure similarity ranking exhausts every remaining
+        # ACDC track before ever picking a different artist.
+        self.assertGreater(_max_consecutive_run(artists), 3)
+
+    def test_cap_falls_back_to_ranking_when_no_alternative_artist_remains(self) -> None:
+        single_artist_catalog = build_catalog([
+            TrackRecord(id=f"solo{i}", path=f"/solo{i}.mp3", title=f"Solo {i}", artist="Solo", genre="rock", bpm=120 + i, year=1980 + i)
+            for i in range(5)
+        ])
+        # Should not stall/truncate just because every candidate shares an
+        # artist with the current streak.
+        queue = generate_queue("solo0", single_artist_catalog, length=4, top_k=10, randomness=0.0)
+        self.assertEqual(len(queue), 4)
+
+
 if __name__ == "__main__":
     unittest.main()

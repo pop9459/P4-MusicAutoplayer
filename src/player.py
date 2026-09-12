@@ -55,12 +55,14 @@ class PlayerEngine:
         randomness: float,
         queue_length: int,
         rng: random.Random | None = None,
+        max_consecutive_same_artist: int | None = 3,
     ) -> None:
         self.catalog = catalog
         self.top_k = top_k
         self.randomness = randomness
         self.queue_length = queue_length
         self.rng = rng or random.Random()
+        self.max_consecutive_same_artist = max_consecutive_same_artist
         self.current_track = start_track
         self.queue: list[TrackRecord] = []
         self.history: list[TrackRecord] = [start_track]
@@ -77,6 +79,7 @@ class PlayerEngine:
             top_k=self.top_k,
             randomness=self.randomness,
             rng=self.rng,
+            max_consecutive_same_artist=self.max_consecutive_same_artist,
         )
         self.queue_regenerated = True
 
@@ -90,6 +93,7 @@ class PlayerEngine:
         track was appended.
         """
         added_any = False
+        recent_artists = [track.artist for track in self.history] + [track.artist for track in self.queue]
         while len(self.queue) < self.queue_length:
             reference_id = self.queue[-1].id if self.queue else self.current_track.id
             excluded_ids = {self.current_track.id}
@@ -103,10 +107,13 @@ class PlayerEngine:
                     randomness=self.randomness,
                     rng=self.rng,
                     excluded_track_ids=excluded_ids,
+                    recent_artists=recent_artists,
+                    max_consecutive_same_artist=self.max_consecutive_same_artist,
                 )
             except ValueError:
                 break
             self.queue.append(next_track)
+            recent_artists.append(next_track.artist)
             added_any = True
         return added_any
 

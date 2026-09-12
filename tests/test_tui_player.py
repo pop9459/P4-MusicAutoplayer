@@ -98,6 +98,7 @@ class TabletedPlayerSetupTests(unittest.TestCase):
             top_k=5,
             randomness=0.0,
             queue_length=10,
+            max_consecutive_same_artist=3,
         )
 
         # Mock the mpv backend

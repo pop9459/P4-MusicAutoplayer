@@ -129,6 +129,7 @@ def _command_queue(args: argparse.Namespace) -> None:
         length=args.length,
         top_k=args.top_k,
         randomness=args.randomness,
+        max_consecutive_same_artist=args.max_consecutive_artist,
     )
 
     print(f"Starting track: {_format_track(current_track)}")
@@ -188,6 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue.add_argument("--length", type=_positive_int, help="Number of next tracks to generate. Defaults to settings.json.")
     queue.add_argument("--top-k", type=_positive_int, help="Number of highest-ranked candidates eligible for each selection. Defaults to settings.json.")
     queue.add_argument("--randomness", type=_randomness, help="Weighted random selection factor from 0.0 to 1.0. Defaults to settings.json.")
+    queue.add_argument("--max-consecutive-artist", type=_positive_int, help="Max same-artist tracks allowed in a row (omit for no cap). Defaults to settings.json.")
     queue.set_defaults(handler=_command_queue)
 
     play = subparsers.add_parser("play", help="Run the demo TUI player (requires mpv).")
@@ -212,6 +214,8 @@ def _apply_settings_defaults(args: argparse.Namespace, settings: Settings) -> No
         args.randomness = settings.randomness
     if hasattr(args, "length") and args.length is None:
         args.length = settings.queue_length
+    if hasattr(args, "max_consecutive_artist") and args.max_consecutive_artist is None:
+        args.max_consecutive_artist = settings.max_consecutive_same_artist
 
 
 def _needs_settings(args: argparse.Namespace) -> bool:

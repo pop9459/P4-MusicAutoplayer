@@ -107,6 +107,7 @@ class Player3Column:
             top_k=self.settings.top_k,
             randomness=self.settings.randomness,
             queue_length=self.settings.queue_length,
+            max_consecutive_same_artist=self.settings.max_consecutive_same_artist,
         )
         self.player_bar.update_track(track)
         self.queue_panel.update_queue(self.engine.queue)
