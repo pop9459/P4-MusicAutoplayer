@@ -199,5 +199,32 @@ class QueueRenderTests(unittest.TestCase):
             self.assertIsNone(re.match(r"^\s*\d+\.\s", line))
 
 
+class SongsRenderTests(unittest.TestCase):
+    """Issue #4: "Play Random" row must always render above the song list."""
+
+    def setUp(self) -> None:
+        self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.settings = load_settings()
+        self.backend = MagicMock(spec=MpvBackend)
+
+    def test_random_row_stays_fixed_regardless_of_scroll(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        # Force a song list long enough to fill the visible column.
+        player.songs_panel.songs = list(self.catalog.tracks) * 3
+        player.songs_panel.selected_index = 0
+
+        stdscr = FakeStdscr()
+        player._render_songs(stdscr, row=0, col=0, width=40, height=10)
+        row_no_scroll = next(row for row, _col, text, _attr in stdscr.calls if "[R] Play Random" in text)
+
+        player.songs_panel.scroll_offset = 3
+        stdscr = FakeStdscr()
+        player._render_songs(stdscr, row=0, col=0, width=40, height=10)
+        row_scrolled = next(row for row, _col, text, _attr in stdscr.calls if "[R] Play Random" in text)
+
+        self.assertEqual(row_no_scroll, row_scrolled)
+        self.assertEqual(row_no_scroll, 1)  # directly under the "Songs" header
+
+
 if __name__ == "__main__":
     unittest.main()

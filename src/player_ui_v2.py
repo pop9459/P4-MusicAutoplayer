@@ -231,16 +231,16 @@ class Player3Column:
         stdscr.addnstr(row, col, "Songs".ljust(width - 1), width - 1, curses.A_BOLD)
         row += 1
 
-        for track, idx, is_selected in self.songs_panel.get_visible_songs(height - 2):
+        # Random button: fixed row, always visible above the scrollable list.
+        btn_attr = curses.A_BOLD if self.active_column == 1 else curses.A_NORMAL
+        stdscr.addnstr(row, col, "[R] Play Random".ljust(width - 1)[:width - 1], width - 1, btn_attr)
+        row += 1
+
+        for track, idx, is_selected in self.songs_panel.get_visible_songs(height - 3):
             attr = curses.A_STANDOUT if is_selected else curses.A_NORMAL
             line = f"{idx + 1}. {track.title}"[:width - 1]
             stdscr.addnstr(row, col, line.ljust(width - 1), width - 1, attr)
             row += 1
-
-        # Random button
-        if row < height:
-            btn_attr = curses.A_BOLD if self.active_column == 1 else curses.A_NORMAL
-            stdscr.addnstr(row, col, "[R] Play Random".ljust(width - 1)[:width - 1], width - 1, btn_attr)
 
     def _render_queue(self, stdscr: curses._CursesWindow, row: int, col: int, width: int, height: int) -> None:
         """Render upcoming queue."""
