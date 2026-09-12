@@ -357,11 +357,12 @@ class Player3Column:
         # Render folders
         self._render_folders(stdscr, 0, 0, col_width_folders, content_height)
 
-        # Render songs
-        self._render_songs(stdscr, 0, col_width_folders, col_width_songs, content_height)
+        # Render songs. Content starts one column right of the divider so
+        # the divider doesn't overwrite the first character of each row.
+        self._render_songs(stdscr, 0, col_width_folders + 1, col_width_songs - 1, content_height)
 
-        # Render queue
-        self._render_queue(stdscr, 0, col_width_folders + col_width_songs, col_width_queue, content_height)
+        # Render queue, same one-column offset for the same reason.
+        self._render_queue(stdscr, 0, col_width_folders + col_width_songs + 1, col_width_queue - 1, content_height)
 
         # Dividing lines
         for y in range(content_height):

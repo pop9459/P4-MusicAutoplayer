@@ -179,6 +179,40 @@ class WorkflowIntegrationTests(unittest.TestCase):
         self.assertTrue(track3.enabled)
 
 
+class ColumnDividerOverlapTests(unittest.TestCase):
+    """Regression test: the vertical divider between columns must not
+    overwrite the first character of songs/queue rows (a real bug that
+    used to be masked by the queue's numeric prefix -- see issue #1
+    follow-up)."""
+
+    def setUp(self) -> None:
+        self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.settings = load_settings()
+        self.backend = MagicMock(spec=MpvBackend)
+
+    def test_full_layout_does_not_clip_songs_or_queue_first_character(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        # Give every track a distinctive, non-space first character so a
+        # clipped column would be immediately detectable.
+        for track in self.catalog.tracks:
+            track.artist = "ZEBRA"
+            track.title = "Track"
+        player.songs_panel.load_songs_from_catalog(self.catalog)
+        player.queue_panel.update_queue(self.catalog.tracks[:3])
+        # Skip real color/ACS init (both require initscr()); irrelevant here.
+        player._colors_ready = True
+
+        stdscr = FakeStdscr(height=24, width=80)
+        with patch("curses.ACS_VLINE", ord("|"), create=True):
+            player._render_layout(stdscr)
+
+        # Row 1 is the first list item under each column's header (row 0).
+        songs_row = stdscr.row_text(2)  # row 1 is the fixed "[R] Play Random" row
+        queue_row = stdscr.row_text(1)
+        self.assertIn("ZEBRA", songs_row)
+        self.assertIn("ZEBRA", queue_row)
+
+
 class QueueRenderTests(unittest.TestCase):
     """Issue #1: queue rows must not be numbered."""
 
