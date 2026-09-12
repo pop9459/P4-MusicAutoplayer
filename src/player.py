@@ -19,7 +19,7 @@ import random
 from dataclasses import dataclass
 
 from .mpv_backend import MpvBackend, MpvUnavailableError
-from .predictor import generate_queue
+from .predictor import generate_queue, recommend_next_track
 from .track_analyzer import Catalog, TrackRecord
 
 POLL_INTERVAL_MS = 200
@@ -80,22 +80,52 @@ class PlayerEngine:
         )
         self.queue_regenerated = True
 
+    def _top_up_queue(self) -> bool:
+        """Append recommendations one at a time until the queue is back to
+        `queue_length` (or no eligible tracks remain).
+
+        Excludes the current track, the entire play history, and everything
+        already queued, so no track repeats within the session while there
+        are still unseen tracks to recommend. Returns True if at least one
+        track was appended.
+        """
+        added_any = False
+        while len(self.queue) < self.queue_length:
+            reference_id = self.queue[-1].id if self.queue else self.current_track.id
+            excluded_ids = {self.current_track.id}
+            excluded_ids.update(track.id for track in self.history)
+            excluded_ids.update(track.id for track in self.queue)
+            try:
+                next_track = recommend_next_track(
+                    reference_id,
+                    self.catalog,
+                    top_k=self.top_k,
+                    randomness=self.randomness,
+                    rng=self.rng,
+                    excluded_track_ids=excluded_ids,
+                )
+            except ValueError:
+                break
+            self.queue.append(next_track)
+            added_any = True
+        return added_any
+
     def peek_next(self) -> TrackRecord | None:
         return self.queue[0] if self.queue else None
 
     def advance(self) -> TrackRecord | None:
-        """Move to the next queued track, refilling the queue if it was empty.
+        """Move to the next queued track, topping the queue back up to
+        `queue_length` afterward.
 
-        Returns the new current track, or None if there is no eligible next
-        track anywhere in the catalog (fully exhausted library).
+        Returns the new current track, or None if the queue was already
+        empty (fully exhausted library, no eligible next track anywhere).
         """
         self.queue_regenerated = False
-        self._refill_if_needed()
         if not self.queue:
             return None
         self.current_track = self.queue.pop(0)
         self.history.append(self.current_track)
-        self._refill_if_needed()
+        self.queue_regenerated = self._top_up_queue()
         return self.current_track
 
 

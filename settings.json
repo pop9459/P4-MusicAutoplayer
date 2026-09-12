@@ -4,5 +4,5 @@
   "music_directory": "testTracks",
   "top_k": 5,
   "randomness": 0.0,
-  "queue_length": 10
+  "queue_length": 50
 }

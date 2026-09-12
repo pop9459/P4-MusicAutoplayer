@@ -62,10 +62,12 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
 
     def test_advance_track_moves_to_next(self) -> None:
         player = Player3Column(self.catalog, self.settings, self.backend)
-        initial_queue_len = len(player.engine.queue)
+        initial_track = player.engine.current_track
         player._advance_track()
-        # Queue should have one less item
-        self.assertLess(len(player.engine.queue), initial_queue_len)
+        # Current track should change, and queue should stay topped up
+        # (rolling top-up) rather than shrinking.
+        self.assertNotEqual(player.engine.current_track.id, initial_track.id)
+        self.assertEqual(len(player.engine.queue), player.settings.queue_length)
 
     def test_folder_selection_loads_new_songs(self) -> None:
         player = Player3Column(self.catalog, self.settings, self.backend)

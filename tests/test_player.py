@@ -57,20 +57,48 @@ class PlayerEngineTests(unittest.TestCase):
         self.assertEqual(engine.current_track.id, first_queued.id)
         self.assertEqual([t.id for t in engine.history], ["start", first_queued.id])
 
-    def test_advance_refills_queue_when_exhausted(self) -> None:
-        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3)
-        # Advance through the initial 3-item queue. Popping the last item
-        # triggers an eager refill, so queue_regenerated flips true on this
-        # final call (do not loop on `while queue`, it never empties).
-        for _ in range(2):
-            engine.advance()
-            self.assertFalse(engine.queue_regenerated)
+    def test_advance_tops_queue_back_up_when_unseen_tracks_remain(self) -> None:
+        # Bigger catalog than queue_length so a top-up has somewhere to pull
+        # a fresh, not-yet-played track from after each advance.
+        catalog = build_catalog([
+            TrackRecord(id="start", path="/music/start.mp3", title="Start", artist="A", genre="pop", bpm=120, year=2020),
+            *(
+                TrackRecord(id=f"track{i}", path=f"/music/track{i}.mp3", title=f"Track {i}", artist="A", genre="pop", bpm=120 + i, year=2020 + i)
+                for i in range(1, 7)
+            ),
+        ])
+        start_track = next(track for track in catalog.tracks if track.id == "start")
+        engine = PlayerEngine(catalog, start_track, top_k=5, randomness=0.0, queue_length=3)
+        self.assertEqual(len(engine.queue), 3)
 
-        next_track = engine.advance()
+        engine.advance()
 
-        self.assertIsNotNone(next_track)
+        # Queue should be topped back up to full length, not left at 2.
+        self.assertEqual(len(engine.queue), 3)
         self.assertTrue(engine.queue_regenerated)
-        self.assertTrue(engine.queue)
+        # No track should repeat between history and the current queue.
+        seen_ids = [t.id for t in engine.history] + [t.id for t in engine.queue]
+        self.assertEqual(len(seen_ids), len(set(seen_ids)))
+
+    def test_advance_stops_topping_up_once_catalog_is_exhausted(self) -> None:
+        # This catalog only has exactly queue_length unique non-start tracks,
+        # so once they've all been played or queued, no unseen candidate
+        # remains and the queue can no longer be topped up.
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3)
+
+        engine.advance()
+        self.assertFalse(engine.queue_regenerated)
+        self.assertEqual(len(engine.queue), 2)
+
+        engine.advance()
+        self.assertFalse(engine.queue_regenerated)
+        self.assertEqual(len(engine.queue), 1)
+
+        engine.advance()
+        self.assertFalse(engine.queue_regenerated)
+        self.assertEqual(engine.queue, [])
+
+        self.assertIsNone(engine.advance())
 
     def test_advance_returns_none_when_no_eligible_tracks_remain(self) -> None:
         tiny_catalog = build_catalog([
