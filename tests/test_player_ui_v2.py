@@ -1,6 +1,7 @@
 """Integration tests for v2 3-column player."""
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,8 @@ from src.queue_panel import QueuePanel
 from src.settings import load_settings
 from src.songs_panel import SongsPanel
 from src.track_analyzer import load_catalog
+
+from tests.curses_stub import FakeStdscr
 
 
 class Player3ColumnIntegrationTests(unittest.TestCase):
@@ -173,6 +176,27 @@ class WorkflowIntegrationTests(unittest.TestCase):
         track3 = player.player_bar.current_track
         self.assertIsNotNone(track3)
         self.assertTrue(track3.enabled)
+
+
+class QueueRenderTests(unittest.TestCase):
+    """Issue #1: queue rows must not be numbered."""
+
+    def setUp(self) -> None:
+        self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.settings = load_settings()
+        self.backend = MagicMock(spec=MpvBackend)
+
+    def test_render_queue_has_no_numeric_prefix(self) -> None:
+        player = Player3Column(self.catalog, self.settings, self.backend)
+        player.queue_panel.update_queue(self.catalog.tracks[:5])
+        stdscr = FakeStdscr()
+
+        player._render_queue(stdscr, row=0, col=0, width=40, height=10)
+
+        rendered_lines = [text for _row, _col, text, _attr in stdscr.calls]
+        self.assertTrue(any("-" in line for line in rendered_lines[1:]))
+        for line in rendered_lines[1:]:
+            self.assertIsNone(re.match(r"^\s*\d+\.\s", line))
 
 
 if __name__ == "__main__":

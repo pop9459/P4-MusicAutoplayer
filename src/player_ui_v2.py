@@ -247,9 +247,9 @@ class Player3Column:
         stdscr.addnstr(row, col, f"Queue ({len(self.queue_panel.queue)})".ljust(width - 1)[:width - 1], width - 1, curses.A_BOLD)
         row += 1
 
-        for track, idx, is_first in self.queue_panel.get_visible_queue(height - 2):
+        for track, _, is_first in self.queue_panel.get_visible_queue(height - 2):
             attr = curses.A_BOLD if is_first else curses.A_NORMAL
-            line = f"{idx + 1}. {track.artist} - {track.title}"[:width - 1]
+            line = f"{track.artist} - {track.title}"[:width - 1]
             stdscr.addnstr(row, col, line.ljust(width - 1), width - 1, attr)
             row += 1
 
