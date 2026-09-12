@@ -61,11 +61,16 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
         # Should auto-load songs from first folder
         self.assertTrue(len(player.songs_panel.songs) > 0)
 
-    def test_engine_initializes_with_first_song(self) -> None:
+    def test_engine_is_none_until_song_selected(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
-        self.assertIsNotNone(player.engine)
-        self.assertIsNotNone(player.engine.current_track)
-        self.backend.load_file.assert_called()
+        self.assertIsNone(player.engine)
+        self.backend.load_file.assert_not_called()
+
+    def test_construction_does_not_start_playback(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        self.assertIsNone(player.engine)
+        self.backend.load_file.assert_not_called()
+        self.assertIsNone(player.player_bar.current_track)
 
     def test_play_selected_song_initializes_playback(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
@@ -82,6 +87,7 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
 
     def test_advance_track_moves_to_next(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
         initial_track = player.engine.current_track
         player._advance_track()
         # Current track should change, and queue should stay topped up
@@ -104,6 +110,25 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
             result = player.handle_folder_input(ord("j"))
             self.assertTrue(result)  # Should not quit
             self.assertGreater(player.folder_panel.selected_index, 0)
+        self.assertIsNone(player.engine)
+
+    def test_handle_folder_input_enter_does_not_play(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.active_column = 0
+        result = player.handle_folder_input(ord("\n"))
+        self.assertTrue(result)
+        self.assertEqual(player.active_column, 1)
+        self.assertIsNone(player.engine)
+        self.backend.load_file.assert_not_called()
+
+    def test_handle_folder_input_space_does_not_play(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.active_column = 0
+        result = player.handle_folder_input(ord(" "))
+        self.assertTrue(result)
+        self.assertEqual(player.active_column, 1)
+        self.assertIsNone(player.engine)
+        self.backend.load_file.assert_not_called()
 
     def test_handle_folder_input_quit_returns_false(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
@@ -125,6 +150,7 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
 
     def test_handle_songs_input_next_track(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
         player.active_column = 1
         initial_queue_len = len(player.engine.queue) if player.engine else 0
         player.handle_songs_input(ord("n"))
@@ -140,6 +166,7 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
 
     def test_queue_updates_on_playback(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
         initial_queue = player.queue_panel.queue[:]
         player._advance_track()
         # Queue should update
@@ -147,6 +174,7 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
 
     def test_player_bar_reflects_current_state(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
         self.assertIsNotNone(player.player_bar.current_track)
         display = player.player_bar.get_track_display()
         self.assertIn(player.player_bar.current_track.title, display)
@@ -174,6 +202,7 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
 
     def test_advance_track_starts_playback_before_topping_up_queue(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
         call_order: list[str] = []
         self.backend.load_file.side_effect = lambda path: call_order.append("load_file")
 
@@ -196,8 +225,8 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
             queue_lengths_seen = []
             original_update_queue = player.queue_panel.update_queue
 
-            def _tracking_update_queue(queue):
-                original_update_queue(queue)
+            def _tracking_update_queue(queue, current_track=None):
+                original_update_queue(queue, current_track)
                 queue_lengths_seen.append(len(queue))
 
             player.queue_panel.update_queue = _tracking_update_queue
@@ -210,9 +239,9 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
     def test_effective_queue_length_uses_terminal_height(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
         player.settings = dataclasses.replace(player.settings, queue_length=1)
-        player._term_height = 40  # visible rows = 40 - 6 = 34
+        player._term_height = 40  # visible rows = 40 - 7 = 33
 
-        self.assertEqual(player._effective_queue_length(), 34)
+        self.assertEqual(player._effective_queue_length(), 33)
 
     def test_effective_queue_length_floors_at_minimum_of_ten(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
@@ -247,11 +276,14 @@ class WorkflowIntegrationTests(unittest.TestCase):
     def test_full_playback_sequence(self) -> None:
         """Sequence: play song → advance track → play random."""
         player = Player3Column(self.library, self.settings, self.backend)
+        # Engine should be None until we explicitly select a song
+        self.assertIsNone(player.engine)
         track1 = player.songs_panel.selected_song
 
         # Play selected
         player._play_selected_song()
         self.assertEqual(player.player_bar.current_track, track1)
+        self.assertIsNotNone(player.engine)
 
         # Advance
         player._advance_track()
@@ -293,9 +325,11 @@ class ColumnDividerOverlapTests(unittest.TestCase):
         with patch("curses.ACS_VLINE", ord("|"), create=True):
             player._render_layout(stdscr)
 
-        # Row 1 is the first list item under each column's header (row 0).
-        songs_row = stdscr.row_text(2)  # row 1 is the fixed "[R] Play Random" row
-        queue_row = stdscr.row_text(1)
+        # Songs: row 0 is header, row 1 is path, row 2 is count, row 3 is "[R] Play Random", row 4 is first song.
+        # Queue: row 0 is "Now Playing" header, row 1 is current track (or "(none)"),
+        # row 2 is "Queue (N)" header, row 3 is first upcoming track.
+        songs_row = stdscr.row_text(4)  # first song item
+        queue_row = stdscr.row_text(3)  # first upcoming queue item
         self.assertIn("ZEBRA", songs_row)
         self.assertIn("ZEBRA", queue_row)
 
@@ -317,8 +351,10 @@ class QueueRenderTests(unittest.TestCase):
         player._render_queue(stdscr, row=0, col=0, width=40, height=10)
 
         rendered_lines = [text for _row, _col, text, _attr in stdscr.calls]
-        self.assertTrue(any("-" in line for line in rendered_lines[1:]))
-        for line in rendered_lines[1:]:
+        # Upcoming queue rows start at index 3 (after "Now Playing", current line, "Queue (N)")
+        upcoming_lines = rendered_lines[3:]
+        self.assertTrue(any("-" in line for line in upcoming_lines))
+        for line in upcoming_lines:
             self.assertIsNone(re.match(r"^\s*\d+\.\s", line))
 
 
@@ -428,6 +464,7 @@ class ProgressBarTests(unittest.TestCase):
 
     def test_refresh_progress_updates_player_bar_from_backend(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
         self.backend.get_time_pos.return_value = 61.0
         self.backend.get_duration.return_value = 180.0
 

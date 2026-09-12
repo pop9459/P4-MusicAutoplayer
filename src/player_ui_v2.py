@@ -37,10 +37,10 @@ QUEUE_REVEAL_DELAY_S = 0.01
 
 # Rows the terminal height loses before it becomes the queue's visible-row
 # budget: _render_layout's content_height = height - 4 (player bar), then
-# _render_queue reserves 1 row for its header and passes `content_height - 2`
-# to QueuePanel.get_visible_queue -- so the queue column can show
-# (height - 4) - 2 = height - 6 rows before needing to scroll.
-QUEUE_COLUMN_CHROME_ROWS = 6
+# _render_queue reserves 3 rows for its header, "Now Playing" line, and passes
+# `content_height - 3` to QueuePanel.get_visible_queue -- so the queue column
+# can show (height - 4) - 3 = height - 7 rows before needing to scroll.
+QUEUE_COLUMN_CHROME_ROWS = 7
 
 MIN_QUEUE_LENGTH = 10
 
@@ -98,8 +98,6 @@ class Player3Column:
             self.songs_panel.load_songs_from_library(
                 self.library, self.folder_panel.selected_entry
             )
-            if self.songs_panel.songs:
-                self._init_engine_with_song(self.songs_panel.songs[0])
 
     @property
     def catalog(self) -> Catalog:
@@ -160,7 +158,7 @@ class Player3Column:
         each track is appended so the queue column fills in one track at a
         time instead of jumping straight to the finished list."""
         for _ in steps:
-            self.queue_panel.update_queue(list(self.engine.queue))
+            self.queue_panel.update_queue(list(self.engine.queue), self.engine.current_track)
             if self._stdscr is not None:
                 self._render_layout(self._stdscr)
                 time.sleep(QUEUE_REVEAL_DELAY_S)
@@ -224,7 +222,7 @@ class Player3Column:
         self.player_bar.set_status(f"Playing: {next_track.title}")
         self.backend.load_file(next_track.path)
         self._reveal_queue_growth(self.engine.top_up_queue_steps())
-        self.queue_panel.update_queue(list(self.engine.queue))
+        self.queue_panel.update_queue(list(self.engine.queue), self.engine.current_track)
         return True
 
     def handle_folder_input(self, key: int) -> bool:
@@ -246,8 +244,7 @@ class Player3Column:
         elif key == ord("\t"):
             self.active_column = 1
         elif key in (ord("\n"), ord(" ")):
-            if self.songs_panel.songs:
-                self._play_selected_song()
+            self.active_column = 1
         elif key in (ord("a"), ord("A")):
             self._begin_add_folder_prompt()
         elif key in (ord("s"), ord("S")):
@@ -392,11 +389,8 @@ class Player3Column:
                 self.library, self.folder_panel.selected_entry
             )
 
-        current_track = self.engine.current_track if self.engine else None
-        if current_track is None and self.songs_panel.songs:
-            current_track = self.songs_panel.songs[0]
-        if current_track is not None:
-            self._init_engine_with_song(current_track)
+        if self.engine is not None:
+            self._init_engine_with_song(self.engine.current_track)
 
         self.player_bar.set_status("Settings applied.")
         self.mode = "player"
@@ -661,25 +655,40 @@ class Player3Column:
     def _render_queue(
         self, stdscr: curses._CursesWindow, row: int, col: int, width: int, height: int
     ) -> None:
-        """Render upcoming queue."""
-        stdscr.addnstr(
-            row,
-            col,
-            f"Queue ({len(self.queue_panel.queue)})".ljust(width - 1)[: width - 1],
-            width - 1,
-            self._header_attr(2),
-        )
-        row += 1
-
+        """Render now-playing track + upcoming queue."""
         head_attr = (
             (curses.color_pair(COLOR_QUEUE_HEAD) | curses.A_BOLD)
             if self._has_colors
             else curses.A_BOLD
         )
-        for track, _, is_first in self.queue_panel.get_visible_queue(height - 2):
-            attr = head_attr if is_first else curses.A_NORMAL
+
+        stdscr.addnstr(
+            row,
+            col,
+            "Now Playing".ljust(width - 1)[: width - 1],
+            width - 1,
+            self._header_attr(2),
+        )
+        row += 1
+
+        current = self.queue_panel.current_track
+        current_line = f"{current.artist} - {current.title}" if current else "(none)"
+        current_line = current_line[: width - 1]
+        stdscr.addnstr(row, col, current_line.ljust(width - 1), width - 1, head_attr)
+        row += 1
+
+        stdscr.addnstr(
+            row,
+            col,
+            f"Queue ({len(self.queue_panel.queue)})".ljust(width - 1)[: width - 1],
+            width - 1,
+            curses.A_DIM,
+        )
+        row += 1
+
+        for track, _ in self.queue_panel.get_visible_queue(height - 3):
             line = f"{track.artist} - {track.title}"[: width - 1]
-            stdscr.addnstr(row, col, line.ljust(width - 1), width - 1, attr)
+            stdscr.addnstr(row, col, line.ljust(width - 1), width - 1, curses.A_NORMAL)
             row += 1
 
     @staticmethod

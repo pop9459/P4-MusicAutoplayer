@@ -10,12 +10,14 @@ from .track_analyzer import TrackRecord
 class QueuePanel:
     """Display upcoming queue."""
     queue: list[TrackRecord] = field(default_factory=list)
+    current_track: TrackRecord | None = None
     scroll_offset: int = 0
     status_message: str = ""
 
-    def update_queue(self, queue: list[TrackRecord]) -> None:
+    def update_queue(self, queue: list[TrackRecord], current_track: TrackRecord | None = None) -> None:
         """Update displayed queue."""
         self.queue = queue
+        self.current_track = current_track
         self.scroll_offset = 0
         self.status_message = f"Queue ({len(queue)})"
 
@@ -29,13 +31,12 @@ class QueuePanel:
         if self.scroll_offset > 0:
             self.scroll_offset -= 1
 
-    def get_visible_queue(self, max_lines: int = 10) -> list[tuple[TrackRecord, int, bool]]:
-        """Get visible queue items for rendering. Return (track, index, is_first)."""
+    def get_visible_queue(self, max_lines: int = 10) -> list[tuple[TrackRecord, int]]:
+        """Get visible queue items for rendering. Return (track, index)."""
         end = min(self.scroll_offset + max_lines, len(self.queue))
         result = []
         for i in range(self.scroll_offset, end):
-            is_first = i == 0
-            result.append((self.queue[i], i, is_first))
+            result.append((self.queue[i], i))
         return result
 
     def clear(self) -> None:

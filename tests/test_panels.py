@@ -169,10 +169,22 @@ class QueuePanelTests(unittest.TestCase):
         panel.update_queue(test_queue)
         visible = list(panel.get_visible_queue(3))
         self.assertTrue(len(visible) > 0)
-        for track, idx, is_first in visible:
+        for track, idx in visible:
             self.assertIsInstance(track, TrackRecord)
             self.assertIsInstance(idx, int)
-            self.assertIsInstance(is_first, bool)
+
+    def test_update_queue_stores_current_track(self) -> None:
+        panel = QueuePanel()
+        current = self.catalog.tracks[0]
+        upcoming = self.catalog.tracks[1:4]
+        panel.update_queue(upcoming, current)
+        self.assertEqual(panel.current_track, current)
+        self.assertEqual(len(panel.queue), 3)
+
+    def test_update_queue_current_track_defaults_to_none(self) -> None:
+        panel = QueuePanel()
+        panel.update_queue(self.catalog.tracks[:3])
+        self.assertIsNone(panel.current_track)
 
 
 class PlayerBarTests(unittest.TestCase):
