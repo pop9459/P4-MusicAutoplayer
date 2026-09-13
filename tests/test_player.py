@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import time
 import unittest
+from collections import Counter
 
 from src.player import (
     PlayerEngine,
@@ -213,10 +214,11 @@ class ArtistRepeatCapTests(unittest.TestCase):
             TrackRecord(id=f"acdc{i}", path=f"/acdc{i}.mp3", title=f"ACDC {i}", artist="ACDC", genre="rock", bpm=120 + i, year=1980 + i)
             for i in range(10)
         ]
+        # Enough alternatives that the cap never has to fall back; the
+        # fallback path itself is covered in test_predictor.
         other_tracks = [
-            TrackRecord(id="queenA", path="/queenA.mp3", title="Queen A", artist="Queen", genre="rock", bpm=121, year=1981),
-            TrackRecord(id="queenB", path="/queenB.mp3", title="Queen B", artist="Queen", genre="rock", bpm=122, year=1982),
-            TrackRecord(id="kissA", path="/kissA.mp3", title="Kiss A", artist="Kiss", genre="rock", bpm=123, year=1983),
+            TrackRecord(id=f"other{i}", path=f"/other{i}.mp3", title=f"Other {i}", artist=f"Band {i}", genre="rock", bpm=121 + i, year=1981 + i)
+            for i in range(10)
         ]
         self.catalog = build_catalog(acdc_tracks + other_tracks)
         self.start_track = next(track for track in self.catalog.tracks if track.id == "acdc0")
@@ -229,6 +231,11 @@ class ArtistRepeatCapTests(unittest.TestCase):
             engine.advance()
             timeline = [self.start_track.artist] + [t.artist for t in engine.history[1:]] + [t.artist for t in engine.queue]
             self.assertLessEqual(_max_consecutive_run(timeline), 3)
+            # The cap bounds an artist's share of a window, not just its
+            # consecutive run, so an alternating pattern can't slip past it.
+            for start in range(max(1, len(timeline) - 5)):
+                window = timeline[start : start + 6]
+                self.assertLessEqual(max(Counter(window).values()), 3)
 
 
 class QueueTaskTests(unittest.TestCase):

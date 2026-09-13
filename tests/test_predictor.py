@@ -120,6 +120,18 @@ class ArtistRepeatCapTests(unittest.TestCase):
         # ACDC track before ever picking a different artist.
         self.assertGreater(_max_consecutive_run(artists), 3)
 
+    def test_cap_catches_an_alternating_pattern_not_just_a_trailing_run(self) -> None:
+        # A dominant artist used to walk straight past a run-length cap:
+        # letting another artist take one turn reset the streak, so
+        # "A A A B A A A" was never blocked. The cap bounds an artist's
+        # share of a window instead.
+        queue = generate_queue("acdc0", self.catalog, length=8, top_k=10, randomness=0.0)
+        artists = ["ACDC"] + [track.artist for track in queue]
+
+        for start in range(len(artists) - 5):
+            window = artists[start : start + 6]
+            self.assertLessEqual(window.count("ACDC"), 3)
+
     def test_cap_falls_back_to_ranking_when_no_alternative_artist_remains(self) -> None:
         single_artist_catalog = build_catalog([
             TrackRecord(id=f"solo{i}", path=f"/solo{i}.mp3", title=f"Solo {i}", artist="Solo", genre="rock", bpm=120 + i, year=1980 + i)

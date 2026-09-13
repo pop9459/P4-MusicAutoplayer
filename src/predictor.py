@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from collections import Counter
 from pathlib import Path
 from typing import Collection, Sequence
 
@@ -46,38 +47,36 @@ def _find_track(catalog: Catalog, track_id: str) -> TrackRecord:
     return track
 
 
-def _trailing_artist_streak(recent_artists: Sequence[str]) -> tuple[str | None, int]:
-    if not recent_artists:
-        return None, 0
-    last_artist = recent_artists[-1]
-    streak = 0
-    for artist in reversed(recent_artists):
-        if artist != last_artist:
-            break
-        streak += 1
-    return last_artist, streak
-
-
 def _apply_artist_repeat_cap(
     ranked_candidates: Sequence[tuple[TrackRecord, float]],
     recent_artists: Sequence[str],
     max_consecutive_same_artist: int | None,
 ) -> Sequence[tuple[TrackRecord, float]]:
-    """Drop candidates that would extend a same-artist run past the cap.
+    """Drop candidates whose artist already fills the recent window.
 
-    A track sharing both genre and artist with the current track scores a
-    perfect cosine match, so pure similarity ranking can queue up many
-    tracks by the same artist in a row. This is a queue-assembly filter
-    (like the existing no-repeat-track exclusion), not a scoring change.
-    Falls back to the unfiltered list if the cap would empty the pool
-    (e.g. a single-artist library), so playback never stalls.
+    A track sharing genre and artist with the current one scores a near
+    perfect match, so pure similarity ranking queues up one artist at a
+    time. The cap used to look only at the trailing run, which a dominant
+    artist walks straight past: with a cap of 3, "A A A B B B A A A" is
+    never blocked, because the run resets every time another artist gets a
+    turn. Counting occurrences across a window instead catches that.
+
+    The window is twice the cap, so the cap is a share of recent picks
+    rather than a run length. This is a queue-assembly filter (like the
+    no-repeat-track exclusion), not a scoring change, and it falls back to
+    the unfiltered list if it would empty the pool -- a single-artist
+    library must still play.
     """
     if not max_consecutive_same_artist or max_consecutive_same_artist < 1:
         return ranked_candidates
-    streak_artist, streak_length = _trailing_artist_streak(recent_artists)
-    if streak_artist is None or streak_length < max_consecutive_same_artist:
+    window = recent_artists[-(2 * max_consecutive_same_artist) :]
+    if not window:
         return ranked_candidates
-    filtered = [item for item in ranked_candidates if item[0].artist != streak_artist]
+    counts = Counter(window)
+    saturated = {artist for artist, count in counts.items() if count >= max_consecutive_same_artist}
+    if not saturated:
+        return ranked_candidates
+    filtered = [item for item in ranked_candidates if item[0].artist not in saturated]
     return filtered or ranked_candidates
 
 
