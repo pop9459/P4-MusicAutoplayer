@@ -82,7 +82,8 @@ class GenreGroupingTests(unittest.TestCase):
 
     def test_broad_canonical_genres_are_grouped(self) -> None:
         self.assertEqual(genre_grouping("rock"), ("rock", "rock"))
-        self.assertEqual(genre_grouping("metal"), ("metal", "rock"))
+        self.assertEqual(genre_grouping("metal"), ("rock", "rock"))
+        self.assertEqual(genre_grouping("grunge"), ("alt", "rock"))
         self.assertEqual(genre_grouping("hip-hop"), ("hip-hop", "urban"))
         self.assertEqual(genre_grouping("r&b"), ("r&b", "urban"))
 
@@ -198,6 +199,30 @@ class SimilarityTermTests(unittest.TestCase):
 
         self.assertAlmostEqual(track_similarity(recent_a, recent_b), track_similarity(old_a, old_b))
 
+    def test_collaborations_share_credit_with_their_members(self) -> None:
+        # A solo track and a collaboration by the same person used to score
+        # 0 on the artist axis, because the whole credit string was one
+        # atomic artist.
+        solo = _features(id="a", path="/a.mp3", artist="Skrillex", genre="electronic")
+        collab = _features(id="b", path="/b.mp3", artist="Skrillex, Boys Noize, Dylan Brady", genre="electronic")
+        unrelated = _features(id="c", path="/c.mp3", artist="Queen", genre="electronic")
+
+        self.assertGreater(track_similarity(solo, collab), track_similarity(solo, unrelated))
+
+    def test_partial_credit_overlap_scores_below_an_exact_match(self) -> None:
+        # Overlap-coefficient scoring would call these identical, which just
+        # re-creates the saturation the artist term is meant to break up.
+        solo = _features(id="a", path="/a.mp3", artist="Skrillex", genre="electronic")
+        collab = _features(id="b", path="/b.mp3", artist="Skrillex, Boys Noize", genre="electronic")
+        other_solo = _features(id="c", path="/c.mp3", artist="Skrillex", genre="electronic")
+
+        self.assertLess(track_similarity(solo, collab), track_similarity(solo, other_solo))
+
+    def test_unknown_artist_is_unmeasured_rather_than_an_artist_named_unknown(self) -> None:
+        a = _features(id="a", path="/a.mp3", artist="unknown", genre="rock", year=1970)
+        b = _features(id="b", path="/b.mp3", artist="unknown", genre="pop", year=2020)
+        self.assertLess(track_similarity(a, b), 0.5)
+
     def test_bpm_similarity_treats_half_and_double_time_as_equivalent(self) -> None:
         # 87 vs 174 BPM is a counting convention, not a tempo difference.
         slow = _features(id="a", path="/a.mp3", artist="X", bpm=87.0)
@@ -229,20 +254,45 @@ class SimilarityTermTests(unittest.TestCase):
         self.assertGreater(same_genre_score, 0.0)
 
 
+def _genre_sim(a: str, b: str) -> float | None:
+    return _genre_similarity(_features(id="a", path="/a.mp3", genre=a), _features(id="b", path="/b.mp3", genre=b))
+
+
 class GenreAdjacencyTests(unittest.TestCase):
     def test_exact_match_scores_one(self) -> None:
-        self.assertEqual(_genre_similarity("rock", "rock"), 1.0)
+        self.assertEqual(_genre_sim("rock", "rock"), 1.0)
 
     def test_adjacent_pair_is_symmetric_and_nonzero(self) -> None:
-        self.assertEqual(_genre_similarity("rock", "metal"), _genre_similarity("metal", "rock"))
-        self.assertGreater(_genre_similarity("rock", "metal"), 0.0)
+        self.assertEqual(_genre_sim("rock", "metal"), _genre_sim("metal", "rock"))
+        self.assertGreater(_genre_sim("rock", "metal"), 0.0)
 
     def test_unrelated_pair_scores_zero(self) -> None:
-        self.assertEqual(_genre_similarity("rock", "classical"), 0.0)
+        self.assertEqual(_genre_sim("rock", "classical"), 0.0)
 
-    def test_unknown_has_no_adjacency(self) -> None:
-        self.assertEqual(_genre_similarity("unknown", "rock"), 0.0)
-        self.assertEqual(_genre_similarity("unknown", "pop"), 0.0)
+    def test_closeness_decreases_down_the_tiers(self) -> None:
+        # same label > same subfamily > same family > bridged families > none
+        self.assertGreater(_genre_sim("rock", "rock"), _genre_sim("rock", "metal"))
+        self.assertGreater(_genre_sim("rock", "metal"), _genre_sim("rock", "grunge"))
+        self.assertGreater(_genre_sim("rock", "grunge"), _genre_sim("rock", "pop"))
+        self.assertGreater(_genre_sim("rock", "pop"), _genre_sim("rock", "classical"))
+
+    def test_orphan_labels_reach_each_other_through_their_family(self) -> None:
+        # Neither is a broad canonical genre, and before grouping they were
+        # similar to nothing at all.
+        self.assertGreater(_genre_sim("brostep", "hardstyle"), 0.0)
+        self.assertGreater(_genre_sim("brostep", "bassline"), _genre_sim("brostep", "hardstyle"))
+
+    def test_unknown_genre_is_unmeasured_rather_than_a_genre_of_its_own(self) -> None:
+        # Returning 0.0 would say "definitely unrelated"; returning 1.0 for
+        # two unknowns would make every untagged track a perfect match for
+        # every other. Both are wrong -- the term is simply not available.
+        self.assertIsNone(_genre_sim("unknown", "rock"))
+        self.assertIsNone(_genre_sim("unknown", "unknown"))
+
+    def test_untagged_tracks_do_not_all_look_identical(self) -> None:
+        a = _features(id="a", path="/a.mp3", genre=None, artist="A", year=1970)
+        b = _features(id="b", path="/b.mp3", genre=None, artist="B", year=2020)
+        self.assertLess(track_similarity(a, b), 0.5)
 
     def test_adjacent_genre_ranks_above_unrelated_genre(self) -> None:
         catalog = build_catalog([
@@ -258,7 +308,7 @@ class GenreAdjacencyTests(unittest.TestCase):
         classical_score = next(score for track, score in ranked if track.id == "classical_track")
         # The two candidates share bpm and year with the seed, so the gap
         # between them is contributed entirely by the genre term.
-        self.assertAlmostEqual(metal_score - classical_score, FEATURE_WEIGHTS["genre"] * _genre_similarity("rock", "metal"))
+        self.assertAlmostEqual(metal_score - classical_score, FEATURE_WEIGHTS["genre"] * _genre_sim("rock", "metal"))
 
     def test_exact_genre_match_similarity_is_unchanged_by_adjacency_table(self) -> None:
         # Two same-genre/same-everything-else tracks should still score a

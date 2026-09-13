@@ -24,10 +24,10 @@ _YEAR_PATTERN = re.compile(r"(\d{4})")
 # at all scores sanely without retuning anything, and tempo starts pulling its
 # full weight the moment the tags exist.
 FEATURE_WEIGHTS = {
-    "genre": 0.35,
+    "genre": 0.45,
     "bpm": 0.25,
-    "year": 0.20,
     "artist": 0.20,
+    "year": 0.10,
 }
 
 # Decay constants for the numeric similarity terms, in the units of the
@@ -36,33 +36,47 @@ _YEAR_DECAY = 12.0
 _BPM_OCTAVE_DECAY = 0.12
 
 
-# Hand-authored similarity between related genre families (symmetric,
-# unordered pairs; unlisted pairs default to 0.0 = unrelated). A one-hot
-# genre match/mismatch treats rock-vs-metal identically to rock-vs-classical
-# ("different" either way), so recommendations can't bridge closely related
-# genres. This table lets the genre block carry a soft distance instead of
-# a hard boundary. Deliberately conservative/sparse: only clearly adjacent
-# families are listed, and "unknown" is intentionally absent so untagged
-# tracks aren't pulled toward anything.
-_GENRE_ADJACENCY: dict[tuple[str, str], float] = {
-    ("rock", "metal"): 0.5,
+# Similarity between two genres that share no label, by how closely the
+# grouping in _GENRE_TREE relates them.
+_SAME_SUBFAMILY_SIMILARITY = 0.6
+_SAME_FAMILY_SIMILARITY = 0.3
+
+# Hand-authored similarity between genre families that are related but not
+# nested (symmetric, unordered pairs; unlisted pairs are unrelated). The
+# tree already covers "close" -- this covers the handful of cross-family
+# bridges a listener would expect, so recommendations aren't confined to one
+# branch. Deliberately sparse: only clearly adjacent families are listed.
+_FAMILY_ADJACENCY: dict[tuple[str, str], float] = {
     ("rock", "pop"): 0.2,
-    ("rock", "folk"): 0.2,
-    ("rock", "country"): 0.2,
+    ("rock", "roots"): 0.2,
     ("pop", "electronic"): 0.3,
-    ("pop", "r&b"): 0.3,
-    ("hip-hop", "r&b"): 0.4,
-    ("hip-hop", "electronic"): 0.2,
-    ("reggae", "latin"): 0.2,
-    ("folk", "country"): 0.3,
-    ("jazz", "classical"): 0.2,
+    ("pop", "urban"): 0.3,
+    ("urban", "electronic"): 0.2,
+    ("jazz", "score"): 0.2,
 }
 
 
-def _genre_similarity(a: str, b: str) -> float:
-    if a == b:
+def _genre_similarity(a: TrackFeatures, b: TrackFeatures) -> float | None:
+    """Genre closeness in [0, 1], or None when either side is untagged.
+
+    Returning None rather than 0.0 for "unknown" matters: 13% of a real
+    library has no genre tag, and treating unknown as a genre of its own made
+    every untagged track a perfect genre match for every other untagged track
+    -- a 355-track clique that all scored 1.0. Unknown means "not measured",
+    so the term is skipped and the other signals decide.
+    """
+    if a.genre == "unknown" or b.genre == "unknown":
+        return None
+    if a.genre == b.genre:
         return 1.0
-    return _GENRE_ADJACENCY.get((a, b), _GENRE_ADJACENCY.get((b, a), 0.0))
+    if a.subfamily is not None and a.subfamily == b.subfamily:
+        return _SAME_SUBFAMILY_SIMILARITY
+    if a.family is None or b.family is None:
+        return 0.0
+    if a.family == b.family:
+        return _SAME_FAMILY_SIMILARITY
+    pair = (a.family, b.family)
+    return _FAMILY_ADJACENCY.get(pair, _FAMILY_ADJACENCY.get((b.family, a.family), 0.0))
 
 
 def _normalize_text(value: str | None, default: str = "") -> str:
@@ -163,7 +177,10 @@ _GENRE_TREE: dict[str, tuple[str, str]] = {
     "schlager": ("standards", "pop"),
     # rock
     "rock": ("rock", "rock"),
-    "metal": ("metal", "rock"),
+    # Metal shares rock's subfamily rather than sitting one tier out: the
+    # previous hand-authored table put rock/metal at 0.5, closer to the
+    # same-subfamily tier than to the same-family one.
+    "metal": ("rock", "rock"),
     "grunge": ("alt", "rock"),
     "punk": ("alt", "rock"),
     "post-punk": ("alt", "rock"),
@@ -206,7 +223,7 @@ _GENRE_FAMILY_KEYWORDS: list[tuple[tuple[str, str], tuple[str, ...]]] = [
     (("electronic", "electronic"), ("techno", "trance", "edm", "rave", "club")),
     (("disco", "pop"), ("disco", "nrg", "eurodance")),
     (("standards", "pop"), ("standards", "easy listening", "schlager", "chanson")),
-    (("metal", "rock"), ("metal", "djent")),
+    (("rock", "rock"), ("metal", "djent")),
     (("alt", "rock"), ("grunge", "punk", "indie rock", "emo")),
     (("wave", "rock"), ("new wave", "new romantic", "darkwave", "permanent wave", "british invasion")),
     (("rock", "rock"), ("rock",)),
@@ -243,6 +260,21 @@ def genre_grouping(label: str) -> tuple[str | None, str | None]:
 def _canonicalize_artist(value: str | None) -> str:
     cleaned = _normalize_text(value, default="unknown")
     return cleaned or "unknown"
+
+
+# Credits arrive as one string: "Skrillex, Boys Noize, Dylan Brady". Treating
+# that as an atomic artist made a solo track and a collaboration by the same
+# person completely unrelated on the artist axis -- 27% of a real library.
+_ARTIST_SEPARATORS = re.compile(
+    r"\s*(?:,|&|\bfeaturing\b|\bfeat\.?\b|\bft\.?\b|\bvs\.?\b)\s*",
+    re.IGNORECASE,
+)
+
+
+def _artist_keys(artist: str) -> frozenset[str]:
+    keys = {part.strip().casefold() for part in _ARTIST_SEPARATORS.split(artist)}
+    keys.discard("")
+    return frozenset(keys) or frozenset({artist.casefold()})
 
 
 def _id_from_path(path: Path) -> str:
@@ -385,16 +417,30 @@ def _features_for(track: TrackRecord) -> TrackFeatures:
         genre=genre,
         subfamily=subfamily,
         family=family,
-        artist_keys=frozenset({artist.casefold()}),
+        artist_keys=_artist_keys(artist),
         year=track.year,
         bpm=track.bpm,
     )
 
 
 def _artist_similarity(a: TrackFeatures, b: TrackFeatures) -> float | None:
-    if not a.artist_keys or not b.artist_keys:
+    """Jaccard overlap between two tracks' sets of credited artists.
+
+    Jaccard rather than plain overlap: overlap would score a solo Skrillex
+    track and a three-way Skrillex collaboration a perfect 1.0, which just
+    re-creates the saturation this is meant to break up. Jaccard's 1/3 says
+    "related, not the same", which is what a listener would say too.
+
+    An untagged artist is "not measured", not an artist named unknown, so
+    the term is skipped rather than matching every other untagged track.
+    """
+    unknown = frozenset({"unknown"})
+    if not a.artist_keys or not b.artist_keys or a.artist_keys == unknown or b.artist_keys == unknown:
         return None
-    return 1.0 if a.artist_keys == b.artist_keys else 0.0
+    intersection = a.artist_keys & b.artist_keys
+    if not intersection:
+        return 0.0
+    return len(intersection) / len(a.artist_keys | b.artist_keys)
 
 
 def _year_similarity(a: TrackFeatures, b: TrackFeatures) -> float | None:
@@ -438,7 +484,7 @@ def track_similarity(a: TrackFeatures, b: TrackFeatures) -> float:
     total_weight = 0.0
     total_score = 0.0
     for name, term in (
-        ("genre", _genre_similarity(a.genre, b.genre)),
+        ("genre", _genre_similarity(a, b)),
         ("bpm", _bpm_similarity(a, b)),
         ("year", _year_similarity(a, b)),
         ("artist", _artist_similarity(a, b)),
