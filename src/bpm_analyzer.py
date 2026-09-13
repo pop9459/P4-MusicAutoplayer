@@ -18,8 +18,11 @@ turn adding a folder into a half-hour block.
 """
 from __future__ import annotations
 
+import contextlib
+import os
+import sys
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 
 from .track_analyzer import TrackRecord
 
@@ -52,6 +55,30 @@ def _load_aubio():
     return aubio
 
 
+@contextlib.contextmanager
+def _silenced_stderr() -> Iterator[None]:
+    """Mute writes to file descriptor 2 for the duration of the block.
+
+    aubio decodes mp3 through libav, which logs benign warnings ("Could not
+    update timestamps for skipped samples" -- gapless-playback padding) for
+    most files, straight to fd 2 from C. Python-level redirection doesn't
+    reach it, and at two files a second the noise buries the progress line.
+
+    Losing genuine stderr output here is acceptable because decoding failures
+    surface as a None result, which the caller reports itself.
+    """
+    saved = os.dup(2)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        sys.stderr.flush()
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        os.dup2(saved, 2)
+        os.close(devnull)
+        os.close(saved)
+
+
 def require_aubio() -> None:
     """Fail fast if aubio is missing, before any work is announced.
 
@@ -72,14 +99,15 @@ def detect_bpm(path: str | Path) -> float | None:
     """
     aubio = _load_aubio()
     try:
-        source = aubio.source(str(path), _SAMPLE_RATE, _HOP_SIZE)
-        tempo = aubio.tempo("default", _WINDOW_SIZE, _HOP_SIZE, source.samplerate)
-        while True:
-            samples, read = source()
-            tempo(samples)
-            if read < _HOP_SIZE:
-                break
-        estimate = float(tempo.get_bpm())
+        with _silenced_stderr():
+            source = aubio.source(str(path), _SAMPLE_RATE, _HOP_SIZE)
+            tempo = aubio.tempo("default", _WINDOW_SIZE, _HOP_SIZE, source.samplerate)
+            while True:
+                samples, read = source()
+                tempo(samples)
+                if read < _HOP_SIZE:
+                    break
+            estimate = float(tempo.get_bpm())
     except Exception:
         # A corrupt or unreadable file must not abort a run over thousands
         # of tracks; the caller reports it and moves on.
