@@ -36,7 +36,20 @@ def save_json(path: str | Path, data: Any) -> None:
         with handle:
             json.dump(data, handle, indent=2, ensure_ascii=True)
             handle.write("\n")
+        # A temp file is created 0600; carry over the mode the file already
+        # had so rewriting it doesn't quietly change its permissions, and
+        # otherwise fall back to what a normal create would have produced.
+        if target.exists():
+            os.chmod(handle.name, target.stat().st_mode & 0o777)
+        else:
+            os.chmod(handle.name, 0o666 & ~_current_umask())
         os.replace(handle.name, target)
     except BaseException:
         Path(handle.name).unlink(missing_ok=True)
         raise
+
+
+def _current_umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask

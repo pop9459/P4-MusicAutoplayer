@@ -152,6 +152,19 @@ class AtomicSaveTests(unittest.TestCase):
 
             self.assertEqual(json.loads(path.read_text()), {"version": 1, "tracks": ["original"]})
 
+    def test_rewriting_a_file_keeps_its_permissions(self) -> None:
+        # The temp file an atomic write goes through is created 0600, so
+        # without carrying the mode over, every save would quietly make the
+        # library private.
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "library.json"
+            save_json(path, {"n": 1})
+            path.chmod(0o644)
+
+            save_json(path, {"n": 2})
+
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+
     def test_a_failed_write_leaves_no_temporary_files_behind(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "library.json"
