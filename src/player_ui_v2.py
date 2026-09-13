@@ -5,9 +5,7 @@ from __future__ import annotations
 import curses
 import random
 import shutil
-import time
 from pathlib import Path
-from typing import Iterator
 
 from .folder_panel import FolderPanel
 from .library import (
@@ -19,7 +17,7 @@ from .library import (
     start_add_folder_task,
 )
 from .mpv_backend import MpvBackend, MpvUnavailableError
-from .player import PlayerEngine, filter_enabled_tracks
+from .player import PlayerEngine, QueueTask, filter_enabled_tracks, start_queue_task
 from .player_bar import PlayerBar
 from .queue_panel import QueuePanel
 from .settings import DEFAULT_SETTINGS_PATH, Settings, load_settings, save_settings
@@ -29,11 +27,6 @@ from .songs_panel import SongsPanel
 from .track_analyzer import Catalog, TrackRecord
 
 POLL_INTERVAL_MS = 200
-
-# Pause after each track is added to the queue during the animated reveal
-# (see _reveal_queue_growth), so the one-by-one build stays visible even
-# though generation itself is fast (tens of ms per track at 2500 tracks).
-QUEUE_REVEAL_DELAY_S = 0.01
 
 # Rows the terminal height loses before it becomes the queue's visible-row
 # budget: _render_layout's content_height = height - 4 (player bar), then
@@ -86,6 +79,9 @@ class Player3Column:
 
         self._scan_task: ScanTask | None = None
         self._adding_folder = False
+
+        self._queue_task: QueueTask | None = None
+        self._queue_task_last_revealed = -1
 
         # Set once run_loop starts (None beforehand, e.g. during this
         # __init__'s own initial engine setup below, before curses exists).
@@ -153,15 +149,35 @@ class Player3Column:
         visible_rows = max(0, height - QUEUE_COLUMN_CHROME_ROWS)
         return max(MIN_QUEUE_LENGTH, self.settings.queue_length, visible_rows)
 
-    def _reveal_queue_growth(self, steps: Iterator[TrackRecord]) -> None:
-        """Consume a `PlayerEngine` queue-building generator, redrawing after
-        each track is appended so the queue column fills in one track at a
-        time instead of jumping straight to the finished list."""
-        for _ in steps:
-            self.queue_panel.update_queue(list(self.engine.queue), self.engine.current_track)
-            if self._stdscr is not None:
-                self._render_layout(self._stdscr)
-                time.sleep(QUEUE_REVEAL_DELAY_S)
+    def _begin_queue_task(self, steps_factory) -> None:
+        """Start building/topping-up the queue on a background thread so
+        queue generation's full-catalog similarity scan never blocks curses
+        input. Cancels any still-running previous task first (e.g. rapid
+        track advances), since only one task may safely mutate
+        `engine.queue` at a time."""
+        if self._queue_task is not None and not self._queue_task.done.is_set():
+            self._queue_task.cancel.set()
+        self._queue_task = start_queue_task(steps_factory)
+        self._queue_task_last_revealed = -1
+
+    def _poll_queue_task(self) -> None:
+        """Check on a running queue-build/top-up task; reflect its progress
+        in the queue panel each tick and clear it once done."""
+        if self._queue_task is None or self.engine is None:
+            return
+
+        revealed = self._queue_task.revealed_count()
+        if revealed != self._queue_task_last_revealed:
+            self._queue_task_last_revealed = revealed
+            self.queue_panel.update_queue(self.engine.queue_snapshot(), self.engine.current_track)
+
+        if not self._queue_task.done.is_set():
+            return
+
+        task = self._queue_task
+        self._queue_task = None
+        if task.error:
+            self.player_bar.set_status(f"Queue build failed: {task.error[0]}")
 
     def _init_engine_with_song(self, track: TrackRecord) -> None:
         """Initialize player engine with starting track.
@@ -182,7 +198,7 @@ class Player3Column:
         )
         self.player_bar.update_track(track)
         self.backend.load_file(track.path)
-        self._reveal_queue_growth(self.engine.build_initial_queue_steps())
+        self._begin_queue_task(self.engine.build_initial_queue_steps)
 
     def _play_random_song(self) -> None:
         """Pick random song from current folder."""
@@ -213,6 +229,12 @@ class Player3Column:
         if not self.engine:
             return False
 
+        if not self.engine.queue and self._queue_task is not None and not self._queue_task.done.is_set():
+            # The initial queue build is still running in the background --
+            # this isn't exhaustion, just not ready yet.
+            self.player_bar.set_status("Queue still building...")
+            return True
+
         next_track = self.engine.advance_immediate()
         if next_track is None:
             self.player_bar.set_status("Queue exhausted.")
@@ -221,8 +243,7 @@ class Player3Column:
         self.player_bar.update_track(next_track)
         self.player_bar.set_status(f"Playing: {next_track.title}")
         self.backend.load_file(next_track.path)
-        self._reveal_queue_growth(self.engine.top_up_queue_steps())
-        self.queue_panel.update_queue(list(self.engine.queue), self.engine.current_track)
+        self._begin_queue_task(self.engine.top_up_queue_steps)
         return True
 
     def handle_folder_input(self, key: int) -> bool:
@@ -445,6 +466,7 @@ class Player3Column:
             # Render all panels
             self._refresh_progress()
             self._poll_scan_task()
+            self._poll_queue_task()
             self._render_layout(stdscr)
 
             # Handle input or auto-advance

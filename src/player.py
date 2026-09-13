@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import curses
 import random
-from dataclasses import dataclass
-from typing import Iterator
+import threading
+from dataclasses import dataclass, field
+from typing import Callable, Iterator
 
 from .mpv_backend import MpvBackend, MpvUnavailableError
 from .predictor import generate_queue_steps, recommend_next_track
@@ -69,6 +70,7 @@ class PlayerEngine:
         self.queue: list[TrackRecord] = []
         self.history: list[TrackRecord] = [start_track]
         self.queue_regenerated = False
+        self._queue_lock = threading.Lock()
         if not defer_queue:
             self._refill_if_needed()
 
@@ -95,9 +97,17 @@ class PlayerEngine:
             rng=self.rng,
             max_consecutive_same_artist=self.max_consecutive_same_artist,
         ):
-            self.queue.append(next_track)
+            with self._queue_lock:
+                self.queue.append(next_track)
             yield next_track
         self.queue_regenerated = True
+
+    def queue_snapshot(self) -> list[TrackRecord]:
+        """Thread-safe copy of `self.queue`, for a caller (e.g. the TUI's
+        render loop) reading the queue while a background thread may still
+        be appending to it via `build_initial_queue_steps`/`top_up_queue_steps`."""
+        with self._queue_lock:
+            return list(self.queue)
 
     def _refill_if_needed(self) -> None:
         if self.queue:
@@ -132,7 +142,8 @@ class PlayerEngine:
                 )
             except ValueError:
                 break
-            self.queue.append(next_track)
+            with self._queue_lock:
+                self.queue.append(next_track)
             recent_artists.append(next_track.artist)
             yield next_track
 
@@ -176,6 +187,48 @@ class PlayerEngine:
             return None
         self.top_up_queue()
         return next_track
+
+
+@dataclass
+class QueueTask:
+    """Wraps a background thread that drains a `PlayerEngine` queue-building
+    generator (`build_initial_queue_steps`/`top_up_queue_steps`), polled from
+    the TUI's render loop instead of consumed inline -- so the full-catalog
+    similarity scan behind each queue slot never blocks curses input. The
+    thread only mutates `PlayerEngine.queue` (under its own lock) and this
+    task's own state; it never touches curses/mpv."""
+
+    thread: threading.Thread | None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    done: threading.Event = field(default_factory=threading.Event)
+    cancel: threading.Event = field(default_factory=threading.Event)
+    _revealed: list[int] = field(default_factory=lambda: [0])
+    error: list[BaseException] = field(default_factory=list)
+
+    def revealed_count(self) -> int:
+        with self.lock:
+            return self._revealed[0]
+
+
+def start_queue_task(steps_factory: Callable[[], Iterator[TrackRecord]]) -> QueueTask:
+    task = QueueTask(thread=None)
+
+    def _run() -> None:
+        try:
+            for _ in steps_factory():
+                if task.cancel.is_set():
+                    break
+                with task.lock:
+                    task._revealed[0] += 1
+        except Exception as error:  # generation shouldn't normally raise; surface if it does
+            task.error.append(error)
+        finally:
+            task.done.set()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    task.thread = thread
+    thread.start()
+    return task
 
 
 @dataclass

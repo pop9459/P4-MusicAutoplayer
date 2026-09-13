@@ -4,6 +4,7 @@ from __future__ import annotations
 import curses
 import dataclasses
 import re
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -88,8 +89,10 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
     def test_advance_track_moves_to_next(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
         player._play_selected_song()
+        player._queue_task.done.wait(timeout=5)
         initial_track = player.engine.current_track
         player._advance_track()
+        player._queue_task.done.wait(timeout=5)
         # Current track should change, and queue should stay topped up
         # (rolling top-up) rather than shrinking.
         self.assertNotEqual(player.engine.current_track.id, initial_track.id)
@@ -197,44 +200,126 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
 
         with patch("src.player.generate_queue_steps", side_effect=lambda *a, **k: call_order.append("generate_queue_steps") or iter([])):
             player._play_selected_song()
+            player._queue_task.done.wait(timeout=5)
 
         self.assertEqual(call_order, ["load_file", "generate_queue_steps"])
 
     def test_advance_track_starts_playback_before_topping_up_queue(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
         player._play_selected_song()
+        player._queue_task.done.wait(timeout=5)  # initial queue ready
         call_order: list[str] = []
         self.backend.load_file.side_effect = lambda path: call_order.append("load_file")
 
         filler_track = self.catalog.tracks[0]
         with patch("src.player.recommend_next_track", side_effect=lambda *a, **k: call_order.append("recommend_next_track") or filler_track):
             player._advance_track()
+            player._queue_task.done.wait(timeout=5)
 
         self.assertEqual(call_order[0], "load_file")
         self.assertIn("recommend_next_track", call_order)
 
     def test_queue_reveals_one_track_at_a_time(self) -> None:
-        """`_init_engine_with_song` should redraw after each track is added
-        to the queue, not just once at the end, so the queue column visibly
-        fills in track by track."""
+        """The queue-build background task should report growing progress
+        one track at a time (via _poll_queue_task), not jump straight from
+        empty to the finished list, so the queue column visibly fills in."""
         player = Player3Column(self.library, self.settings, self.backend)
         player._stdscr = FakeStdscr(height=24, width=80)
         player._colors_ready = True
 
-        with patch("src.player_ui_v2.QUEUE_REVEAL_DELAY_S", 0.0), patch("curses.ACS_VLINE", ord("|"), create=True):
-            queue_lengths_seen = []
-            original_update_queue = player.queue_panel.update_queue
+        import src.player as player_module
 
-            def _tracking_update_queue(queue, current_track=None):
-                original_update_queue(queue, current_track)
-                queue_lengths_seen.append(len(queue))
+        original_generate_queue_steps = player_module.generate_queue_steps
 
-            player.queue_panel.update_queue = _tracking_update_queue
+        def _slow_generate_queue_steps(*args, **kwargs):
+            for track in original_generate_queue_steps(*args, **kwargs):
+                time.sleep(0.02)
+                yield track
+
+        queue_lengths_seen = []
+        original_update_queue = player.queue_panel.update_queue
+
+        def _tracking_update_queue(queue, current_track=None):
+            original_update_queue(queue, current_track)
+            queue_lengths_seen.append(len(queue))
+
+        player.queue_panel.update_queue = _tracking_update_queue
+
+        with patch("src.player.generate_queue_steps", side_effect=_slow_generate_queue_steps):
             player._play_selected_song()
+            deadline = time.time() + 5
+            while player._queue_task is not None and not player._queue_task.done.is_set() and time.time() < deadline:
+                player._poll_queue_task()
+                time.sleep(0.01)
+            player._poll_queue_task()
 
         self.assertGreater(len(queue_lengths_seen), 1)
         self.assertEqual(queue_lengths_seen, sorted(queue_lengths_seen))
         self.assertEqual(queue_lengths_seen[-1], len(player.engine.queue))
+
+    def test_play_selected_song_does_not_block_on_queue_generation(self) -> None:
+        """Regression test for issue #15: selecting a track must return
+        immediately even when queue generation is slow, instead of blocking
+        the calling (UI) thread until the full-catalog scan finishes."""
+        player = Player3Column(self.library, self.settings, self.backend)
+
+        def _slow_generate_queue_steps(*args, **kwargs):
+            for _ in range(3):
+                time.sleep(2.0)
+                yield self.catalog.tracks[0]
+
+        with patch("src.player.generate_queue_steps", side_effect=_slow_generate_queue_steps):
+            started = time.time()
+            player._play_selected_song()
+            elapsed = time.time() - started
+
+        self.assertLess(elapsed, 1.0)
+        self.assertIsNotNone(player._queue_task)
+        self.assertFalse(player._queue_task.done.is_set())
+        player._queue_task.cancel.set()
+        player._queue_task.done.wait(timeout=5)
+
+    def test_advance_track_cancels_stale_queue_task(self) -> None:
+        """A second `_advance_track()` fired before the previous top-up
+        finishes must cancel the stale background task rather than let two
+        threads race on `engine.queue`."""
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
+        player._queue_task.done.wait(timeout=5)  # initial queue ready
+
+        def _slow_recommend_next_track(*args, **kwargs):
+            time.sleep(0.2)
+            return self.catalog.tracks[0]
+
+        with patch("src.player.recommend_next_track", side_effect=_slow_recommend_next_track):
+            player._advance_track()
+            old_task = player._queue_task
+            self.assertIsNotNone(old_task)
+            self.assertFalse(old_task.done.is_set())
+
+            player._advance_track()
+
+        self.assertTrue(old_task.cancel.is_set())
+        self.assertIsNot(player._queue_task, old_task)
+        old_task.done.wait(timeout=5)
+        if player._queue_task is not None:
+            player._queue_task.cancel.set()
+            player._queue_task.done.wait(timeout=5)
+
+    def test_poll_queue_task_reports_error(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+
+        def _raising_generate_queue_steps(*args, **kwargs):
+            raise RuntimeError("boom")
+            yield  # pragma: no cover - unreachable, makes this a generator
+
+        with patch("src.player.generate_queue_steps", side_effect=_raising_generate_queue_steps):
+            player._play_selected_song()
+            player._queue_task.done.wait(timeout=5)
+            player._poll_queue_task()
+
+        self.assertIn("Queue build failed", player.player_bar.status_message)
+        self.assertIsNone(player._queue_task)
 
     def test_effective_queue_length_uses_terminal_height(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)

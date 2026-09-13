@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import random
+import time
 import unittest
 
-from src.player import PlayerEngine, clamp_index, filter_enabled_tracks, format_track_line
+from src.player import (
+    PlayerEngine,
+    clamp_index,
+    filter_enabled_tracks,
+    format_track_line,
+    start_queue_task,
+)
 from src.track_analyzer import TrackRecord, build_catalog
 
 
@@ -222,6 +229,64 @@ class ArtistRepeatCapTests(unittest.TestCase):
             engine.advance()
             timeline = [self.start_track.artist] + [t.artist for t in engine.history[1:]] + [t.artist for t in engine.queue]
             self.assertLessEqual(_max_consecutive_run(timeline), 3)
+
+
+class QueueTaskTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.catalog = build_catalog([
+            TrackRecord(id="start", path="/music/start.mp3", title="Start", artist="A", genre="pop", bpm=120, year=2020),
+            *(
+                TrackRecord(id=f"track{i}", path=f"/music/track{i}.mp3", title=f"Track {i}", artist="A", genre="pop", bpm=120 + i, year=2020 + i)
+                for i in range(1, 8)
+            ),
+        ])
+        self.start_track = next(track for track in self.catalog.tracks if track.id == "start")
+
+    def test_start_queue_task_completes_and_reveals_all_tracks(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3, defer_queue=True)
+
+        task = start_queue_task(engine.build_initial_queue_steps)
+        self.assertTrue(task.done.wait(timeout=5))
+
+        self.assertEqual(task.error, [])
+        self.assertEqual(task.revealed_count(), 3)
+        self.assertEqual(len(engine.queue), 3)
+
+    def test_start_queue_task_top_up_reveals_incrementally(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3)
+        engine.queue = []
+
+        task = start_queue_task(engine.top_up_queue_steps)
+        self.assertTrue(task.done.wait(timeout=5))
+
+        self.assertEqual(task.error, [])
+        self.assertEqual(task.revealed_count(), 3)
+        self.assertEqual(len(engine.queue), 3)
+
+    def test_queue_task_cancel_stops_further_reveals(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=6, defer_queue=True)
+
+        original_steps = engine.build_initial_queue_steps
+
+        def _slow_steps():
+            for track in original_steps():
+                time.sleep(0.05)
+                yield track
+
+        task = start_queue_task(_slow_steps)
+        time.sleep(0.08)
+        task.cancel.set()
+        self.assertTrue(task.done.wait(timeout=5))
+
+        self.assertLess(task.revealed_count(), 6)
+
+    def test_queue_snapshot_returns_consistent_copy(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3)
+
+        snapshot = engine.queue_snapshot()
+
+        self.assertEqual([t.id for t in snapshot], [t.id for t in engine.queue])
+        self.assertIsNot(snapshot, engine.queue)
 
 
 if __name__ == "__main__":
