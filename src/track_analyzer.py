@@ -125,6 +125,129 @@ def canonicalize_genre(value: str | None) -> str:
     return cleaned
 
 
+# Two-level grouping over canonical genre labels: label -> (subfamily, family).
+#
+# Real tag data is a long tail: of 198 labels seen in a 2599-track library, 89
+# occur exactly once, and 185 of them match none of the broad families above --
+# roughly a fifth of the library sits in labels like "brostep", "hard bass" or
+# "indietronica" that are similar to nothing. Collapsing those into their broad
+# family would fix the isolation but destroy the distinction (every electronic
+# track would be equally similar to every other, and "electronic" is 23% of the
+# library). So labels keep their own identity and gain a grouping instead:
+# same label > same subfamily > same family > unrelated.
+#
+# Deliberately NOT listed: "unknown", plus non-genres like "speedrun" and
+# "meme". Those should stay isolated rather than being pulled toward anything.
+_GENRE_TREE: dict[str, tuple[str, str]] = {
+    # electronic
+    "electronic": ("electronic", "electronic"),
+    "brostep": ("bass", "electronic"),
+    "bassline": ("bass", "electronic"),
+    "hard bass": ("bass", "electronic"),
+    "brazilian bass": ("bass", "electronic"),
+    "bass house": ("bass", "electronic"),
+    "drum and bass": ("bass", "electronic"),
+    "jungle": ("bass", "electronic"),
+    "hardstyle": ("hard", "electronic"),
+    "hardcore": ("hard", "electronic"),
+    "hands up": ("hard", "electronic"),
+    "gabber": ("hard", "electronic"),
+    "melbourne bounce": ("house", "electronic"),
+    "melbourne bounce international": ("house", "electronic"),
+    "bounce": ("house", "electronic"),
+    "indietronica": ("synth", "electronic"),
+    "aussietronica": ("synth", "electronic"),
+    "electra": ("synth", "electronic"),
+    "synthwave": ("synth", "electronic"),
+    "synthpop": ("synth", "electronic"),
+    # pop
+    "pop": ("pop", "pop"),
+    "disco": ("disco", "pop"),
+    "hi-nrg": ("disco", "pop"),
+    "italo disco": ("disco", "pop"),
+    "eurodance": ("disco", "pop"),
+    "adult standards": ("standards", "pop"),
+    "easy listening": ("standards", "pop"),
+    "schlager": ("standards", "pop"),
+    # rock
+    "rock": ("rock", "rock"),
+    "metal": ("metal", "rock"),
+    "grunge": ("alt", "rock"),
+    "punk": ("alt", "rock"),
+    "post-punk": ("alt", "rock"),
+    "indie rock": ("alt", "rock"),
+    "new romantic": ("wave", "rock"),
+    "new wave": ("wave", "rock"),
+    # urban
+    "hip-hop": ("hip-hop", "urban"),
+    "g funk": ("hip-hop", "urban"),
+    "r&b": ("r&b", "urban"),
+    "funk": ("r&b", "urban"),
+    # world
+    "reggae": ("reggae", "world"),
+    "latin": ("latin", "world"),
+    # roots
+    "folk": ("folk", "roots"),
+    "country": ("country", "roots"),
+    # score
+    "classical": ("classical", "score"),
+    "soundtrack": ("film", "score"),
+    "orchestral soundtrack": ("film", "score"),
+    "german soundtrack": ("film", "score"),
+    "hollywood": ("film", "score"),
+    "theme": ("film", "score"),
+    "video game music": ("film", "score"),
+    "musique militaire": ("film", "score"),
+    # jazz sits in its own family; its closeness to classical comes from the
+    # explicit override table rather than from a shared family.
+    "jazz": ("jazz", "jazz"),
+}
+
+# Fallback for labels not listed above, so a tag this library has never seen
+# still lands somewhere sensible instead of becoming another island. Checked
+# in order, first substring hit wins, so more specific keywords come first.
+_GENRE_FAMILY_KEYWORDS: list[tuple[tuple[str, str], tuple[str, ...]]] = [
+    (("bass", "electronic"), ("brostep", "dubstep", "bassline", "bass", "drum and bass", "jungle", "riddim")),
+    (("hard", "electronic"), ("hardstyle", "hardcore", "hands up", "gabber", "rawstyle", "frenchcore", "nightcore", "uptempo")),
+    (("house", "electronic"), ("house", "bounce", "big room", "garage")),
+    (("synth", "electronic"), ("tronica", "synth", "electro", "chiptune", "complextro", "glitch", "phonk", "downtempo")),
+    (("electronic", "electronic"), ("techno", "trance", "edm", "rave", "club")),
+    (("disco", "pop"), ("disco", "nrg", "eurodance")),
+    (("standards", "pop"), ("standards", "easy listening", "schlager", "chanson")),
+    (("metal", "rock"), ("metal", "djent")),
+    (("alt", "rock"), ("grunge", "punk", "indie rock", "emo")),
+    (("wave", "rock"), ("new wave", "new romantic", "darkwave", "permanent wave", "british invasion")),
+    (("rock", "rock"), ("rock",)),
+    (("hip-hop", "urban"), ("hip hop", "hip-hop", "rap", "trap", "g funk", "drill")),
+    (("r&b", "urban"), ("r&b", "rnb", "soul", "funk", "motown")),
+    (("reggae", "world"), ("reggae", "dancehall", "ska")),
+    (("latin", "world"), ("latin", "reggaeton", "salsa", "cumbia", "bossa", "cubaton", "flamenco", "tropical", "zouk", "balkan")),
+    (("folk", "roots"), ("folk", "ludov", "heligonka", "bluegrass")),
+    (("country", "roots"), ("country", "honky")),
+    (("film", "score"), ("soundtrack", "orchestral", "score", "hollywood", "theme", "video game", "militaire", "movie", "cartoon", "anime", "rhythm game", "tunes")),
+    (("classical", "score"), ("classical", "baroque", "opera")),
+    (("jazz", "jazz"), ("jazz", "swing", "bebop")),
+    (("pop", "pop"), ("pop", "boy band", "idol")),
+]
+
+
+def genre_grouping(label: str) -> tuple[str | None, str | None]:
+    """Resolve a canonical genre label to its (subfamily, family).
+
+    Returns (None, None) for labels that should stay isolated -- "unknown"
+    and anything that matches no family, such as "speedrun" or "meme".
+    """
+    if not label or label == "unknown":
+        return None, None
+    grouping = _GENRE_TREE.get(label)
+    if grouping is not None:
+        return grouping
+    for grouping, keywords in _GENRE_FAMILY_KEYWORDS:
+        if any(keyword in label for keyword in keywords):
+            return grouping
+    return None, None
+
+
 def _canonicalize_artist(value: str | None) -> str:
     cleaned = _normalize_text(value, default="unknown")
     return cleaned or "unknown"

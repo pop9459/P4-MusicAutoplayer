@@ -18,6 +18,7 @@ from src.track_analyzer import (
     _read_tag_metadata,
     build_catalog,
     canonicalize_genre,
+    genre_grouping,
 )
 
 
@@ -53,6 +54,38 @@ class CanonicalizeGenreTests(unittest.TestCase):
     def test_unmapped_niche_genre_is_kept_as_is(self) -> None:
         self.assertEqual(canonicalize_genre("Heligonka"), "folk")
         self.assertEqual(canonicalize_genre("Some Totally Unique Tag"), "some totally unique tag")
+
+
+class GenreGroupingTests(unittest.TestCase):
+    def test_orphan_labels_keep_their_identity_but_gain_a_family(self) -> None:
+        # "brostep" is its own label (not collapsed into "electronic") yet it
+        # must still group with the rest of the electronic family, otherwise
+        # it is similar to nothing at all.
+        self.assertEqual(canonicalize_genre("Brostep"), "brostep")
+        self.assertEqual(genre_grouping("brostep"), ("bass", "electronic"))
+
+    def test_related_orphans_share_a_subfamily(self) -> None:
+        for label in ["brostep", "bassline", "hard bass", "brazilian bass"]:
+            self.assertEqual(genre_grouping(label), ("bass", "electronic"))
+
+    def test_orphans_in_the_same_family_differ_by_subfamily(self) -> None:
+        self.assertEqual(genre_grouping("hardstyle"), ("hard", "electronic"))
+        self.assertEqual(genre_grouping("melbourne bounce"), ("house", "electronic"))
+
+    def test_broad_canonical_genres_are_grouped(self) -> None:
+        self.assertEqual(genre_grouping("rock"), ("rock", "rock"))
+        self.assertEqual(genre_grouping("metal"), ("metal", "rock"))
+        self.assertEqual(genre_grouping("hip-hop"), ("hip-hop", "urban"))
+        self.assertEqual(genre_grouping("r&b"), ("r&b", "urban"))
+
+    def test_keyword_fallback_groups_labels_not_listed_explicitly(self) -> None:
+        self.assertEqual(genre_grouping("norwegian hardcore"), ("hard", "electronic"))
+        self.assertEqual(genre_grouping("epic orchestral"), ("film", "score"))
+
+    def test_unknown_and_non_genres_stay_isolated(self) -> None:
+        self.assertEqual(genre_grouping("unknown"), (None, None))
+        self.assertEqual(genre_grouping("speedrun"), (None, None))
+        self.assertEqual(genre_grouping("meme"), (None, None))
 
 
 class YearAndBpmParsingTests(unittest.TestCase):
