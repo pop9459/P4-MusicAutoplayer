@@ -8,7 +8,7 @@ A local, offline music recommender/player. It scans mp3 folders into a central J
 
 ## Commands
 
-Install dependencies (single real dependency: `mutagen`):
+Install dependencies (`mutagen` for tag reading, `dbus-next` for the MPRIS media-key service):
 
 ```bash
 pip install -r requirements.txt
@@ -83,6 +83,7 @@ There is no build step or lint configuration in this repo.
 - `src/cli.py` wires settings, the library, and recommender operations into `python -m src.cli` commands. The `play` command launches the 3-column TUI against a `Library`; `add-folder`/`list-folders`/`remove-folder` manage tracked folders; the remaining debug commands still operate on a raw `--catalog` file.
 - `src/player.py` contains `PlayerEngine` — stateful queue/playback logic and track filtering, testable without curses or mpv.
 - `src/mpv_backend.py` controls one background `mpv` process over its Unix JSON IPC socket.
+- `src/mpris_service.py` runs an `org.mpris.MediaPlayer2` D-Bus service on a background thread (`dbus-next`, asyncio-based) so hardware media keys (Play/Pause, Next) control playback even when the terminal isn't OS-focused. The D-Bus thread never touches curses/mpv/`PlayerEngine` directly: it pushes requested actions onto a lock-guarded `MprisActionQueue`, drained once per `run_loop` tick by `Player3Column._poll_mpris_task`, which applies them through the same methods a keypress would use. Fails soft (no session bus, `dbus-next` missing) rather than raising, so `Player3Column` construction stays safe for tests.
 
 ### UI modules (v2, 3-column layout — current)
 - `src/folder_panel.py` — left column: a virtual "All Tracks" `FolderEntry` (aggregates every tracked folder) followed by one `FolderEntry` per tracked folder, built from a `Library` via `load_from_library`.

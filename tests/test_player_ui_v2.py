@@ -124,14 +124,41 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
         self.assertIsNone(player.engine)
         self.backend.load_file.assert_not_called()
 
-    def test_handle_folder_input_space_does_not_play(self) -> None:
+    def test_handle_folder_input_space_toggles_pause(self) -> None:
+        """Issue #16: playback controls must work from the folder column,
+        not just once the songs column has focus. Space is now the global
+        pause key everywhere, so it no longer moves focus to songs."""
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
+        player.active_column = 0
+        self.backend.toggle_pause.return_value = True
+
+        result = player.handle_folder_input(ord(" "))
+
+        self.assertTrue(result)
+        self.assertEqual(player.active_column, 0)
+        self.backend.toggle_pause.assert_called_once()
+        self.assertTrue(player.player_bar.paused)
+
+    def test_handle_folder_input_n_advances_track(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
+        player._queue_task.done.wait(timeout=5)
+        player.active_column = 0
+        initial_track = player.engine.current_track
+
+        player.handle_folder_input(ord("n"))
+
+        self.assertNotEqual(player.engine.current_track.id, initial_track.id)
+
+    def test_handle_folder_input_r_plays_random(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
         player.active_column = 0
-        result = player.handle_folder_input(ord(" "))
+
+        result = player.handle_folder_input(ord("r"))
+
         self.assertTrue(result)
-        self.assertEqual(player.active_column, 1)
-        self.assertIsNone(player.engine)
-        self.backend.load_file.assert_not_called()
+        self.assertIsNotNone(player.player_bar.current_track)
 
     def test_handle_folder_input_quit_returns_false(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
@@ -158,14 +185,6 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
         initial_queue_len = len(player.engine.queue) if player.engine else 0
         player.handle_songs_input(ord("n"))
         # Queue should advance
-
-    def test_handle_queue_input_scrolls(self) -> None:
-        player = Player3Column(self.library, self.settings, self.backend)
-        player.active_column = 2
-        initial_offset = player.queue_panel.scroll_offset
-        player.handle_queue_input(ord("j"))
-        # Offset should change or stay at edge
-        self.assertGreaterEqual(player.queue_panel.scroll_offset, 0)
 
     def test_queue_updates_on_playback(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
@@ -530,7 +549,7 @@ class ColorAndFocusTests(unittest.TestCase):
         player._render_folders(stdscr, row=0, col=0, width=20, height=10)
         focused_attrs = {attr for _r, _c, _t, attr in stdscr.calls}
 
-        player.active_column = 2  # folders no longer focused
+        player.active_column = 1  # folders no longer focused
         stdscr = FakeStdscr()
         player._render_folders(stdscr, row=0, col=0, width=20, height=10)
         unfocused_attrs = {attr for _r, _c, _t, attr in stdscr.calls}
@@ -602,7 +621,7 @@ class SettingsModeTests(unittest.TestCase):
         self.assertEqual(player.mode, "player")
 
     def test_s_key_opens_settings_from_each_column(self) -> None:
-        for column, handler_name in ((0, "handle_folder_input"), (1, "handle_songs_input"), (2, "handle_queue_input")):
+        for column, handler_name in ((0, "handle_folder_input"), (1, "handle_songs_input")):
             with self.subTest(column=column):
                 player = Player3Column(self.library, self.settings, self.backend)
                 player.active_column = column

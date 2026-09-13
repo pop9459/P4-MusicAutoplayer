@@ -16,6 +16,7 @@ from .library import (
     save_library,
     start_add_folder_task,
 )
+from .mpris_service import MprisService, start_mpris_service
 from .mpv_backend import MpvBackend, MpvUnavailableError
 from .player import PlayerEngine, QueueTask, filter_enabled_tracks, start_queue_task
 from .player_bar import PlayerBar
@@ -71,7 +72,7 @@ class Player3Column:
         self.settings_panel = SettingsPanel()
 
         self.engine: PlayerEngine | None = None
-        self.active_column = 0  # 0=folders, 1=songs, 2=queue
+        self.active_column = 0  # 0=folders, 1=songs
         self.mode = "player"  # "player" | "settings"
 
         self._colors_ready = False
@@ -82,6 +83,11 @@ class Player3Column:
 
         self._queue_task: QueueTask | None = None
         self._queue_task_last_revealed = -1
+
+        # Not started here: MPRIS needs a real event loop/D-Bus session, and
+        # Player3Column is constructed directly (no curses/D-Bus) throughout
+        # the test suite. Started from run_loop instead, once curses is live.
+        self._mpris_service: MprisService | None = None
 
         # Set once run_loop starts (None beforehand, e.g. during this
         # __init__'s own initial engine setup below, before curses exists).
@@ -179,6 +185,39 @@ class Player3Column:
         if task.error:
             self.player_bar.set_status(f"Queue build failed: {task.error[0]}")
 
+    def _poll_mpris_task(self) -> None:
+        """Drain actions requested via MPRIS (hardware media keys) and apply
+        them through the same methods a keypress would use, then refresh the
+        state mirror MPRIS reads for PlaybackStatus/Metadata."""
+        if self._mpris_service is None:
+            return
+
+        for action in self._mpris_service.actions.drain():
+            if action == "play_pause":
+                if self.engine:
+                    self.player_bar.set_paused(self.backend.toggle_pause())
+            elif action == "play":
+                if self.engine and self.player_bar.paused:
+                    self.player_bar.set_paused(self.backend.toggle_pause())
+            elif action == "pause":
+                if self.engine and not self.player_bar.paused:
+                    self.player_bar.set_paused(self.backend.toggle_pause())
+            elif action == "next":
+                self._advance_track()
+            elif action == "stop":
+                if self.engine:
+                    self.backend.stop()
+                    self.player_bar.set_status("Stopped.")
+
+        track = self.engine.current_track if self.engine else None
+        self._mpris_service.state.update(
+            playing=bool(self.engine) and not self.player_bar.paused,
+            has_track=track is not None,
+            title=track.title if track else "",
+            artist=track.artist if track else "",
+            track_id=track.id if track else "",
+        )
+
     def _init_engine_with_song(self, track: TrackRecord) -> None:
         """Initialize player engine with starting track.
 
@@ -246,11 +285,36 @@ class Player3Column:
         self._begin_queue_task(self.engine.top_up_queue_steps)
         return True
 
-    def handle_folder_input(self, key: int) -> bool:
-        """Handle input in folder column. Return False to quit."""
+    def _handle_playback_keys(self, key: int) -> bool | None:
+        """Playback controls usable from any column (folders or songs) --
+        so play/pause etc. aren't only reachable once the songs column has
+        focus. Returns False to quit, True if the key was consumed here, or
+        None so the caller falls through to column-specific handling
+        (navigation, Enter-to-play, etc.)."""
         if key in (ord("q"), ord("Q")):
             return False
-        elif key == curses.KEY_DOWN or key == ord("j"):
+        elif key in (ord("p"), ord("P")) or key == ord(" "):
+            if self.engine:
+                self.player_bar.set_paused(self.backend.toggle_pause())
+            return True
+        elif key in (ord("n"), ord("N")):
+            self._advance_track()
+            return True
+        elif key in (ord("r"), ord("R")):
+            self._play_random_song()
+            return True
+        elif key in (ord("s"), ord("S")):
+            self._enter_settings_mode()
+            return True
+        return None
+
+    def handle_folder_input(self, key: int) -> bool:
+        """Handle input in folder column. Return False to quit."""
+        result = self._handle_playback_keys(key)
+        if result is not None:
+            return result
+
+        if key == curses.KEY_DOWN or key == ord("j"):
             self.folder_panel.next_folder()
             if self.folder_panel.selected_entry:
                 self.songs_panel.load_songs_from_library(
@@ -264,56 +328,27 @@ class Player3Column:
                 )
         elif key == ord("\t"):
             self.active_column = 1
-        elif key in (ord("\n"), ord(" ")):
+        elif key == ord("\n"):
             self.active_column = 1
         elif key in (ord("a"), ord("A")):
             self._begin_add_folder_prompt()
-        elif key in (ord("s"), ord("S")):
-            self._enter_settings_mode()
 
         return True
 
     def handle_songs_input(self, key: int) -> bool:
         """Handle input in songs column. Return False to quit."""
-        if key in (ord("q"), ord("Q")):
-            return False
-        elif key == curses.KEY_DOWN or key == ord("j"):
+        result = self._handle_playback_keys(key)
+        if result is not None:
+            return result
+
+        if key == curses.KEY_DOWN or key == ord("j"):
             self.songs_panel.next_song()
         elif key == curses.KEY_UP or key == ord("k"):
             self.songs_panel.previous_song()
         elif key == ord("\t"):
-            self.active_column = 2
-        elif key in (ord("p"), ord("P")) or key == ord(" "):
-            if self.engine:
-                self.player_bar.set_paused(self.backend.toggle_pause())
-        elif key in (ord("n"), ord("N")):
-            self._advance_track()
-        elif key in (ord("r"), ord("R")):
-            self._play_random_song()
+            self.active_column = 0
         elif key in (ord("\n"),):
             self._play_selected_song()
-        elif key in (ord("s"), ord("S")):
-            self._enter_settings_mode()
-
-        return True
-
-    def handle_queue_input(self, key: int) -> bool:
-        """Handle input in queue column. Return False to quit."""
-        if key in (ord("q"), ord("Q")):
-            return False
-        elif key == curses.KEY_DOWN or key == ord("j"):
-            self.queue_panel.scroll_down()
-        elif key == curses.KEY_UP or key == ord("k"):
-            self.queue_panel.scroll_up()
-        elif key == ord("\t"):
-            self.active_column = 0
-        elif key in (ord("n"), ord("N")):
-            self._advance_track()
-        elif key in (ord("p"), ord("P")) or key == ord(" "):
-            if self.engine:
-                self.player_bar.set_paused(self.backend.toggle_pause())
-        elif key in (ord("s"), ord("S")):
-            self._enter_settings_mode()
 
         return True
 
@@ -430,10 +465,8 @@ class Player3Column:
             return self.handle_settings_input(key)
         if self.active_column == 0:
             return self.handle_folder_input(key)
-        elif self.active_column == 1:
-            return self.handle_songs_input(key)
         else:
-            return self.handle_queue_input(key)
+            return self.handle_songs_input(key)
 
     def handle_settings_input(self, key: int) -> bool:
         """Handle input while the settings screen is open. Return False to quit."""
@@ -461,12 +494,14 @@ class Player3Column:
         """Main event loop."""
         self._stdscr = stdscr
         stdscr.timeout(POLL_INTERVAL_MS)
+        self._mpris_service = start_mpris_service()
 
         while True:
             # Render all panels
             self._refresh_progress()
             self._poll_scan_task()
             self._poll_queue_task()
+            self._poll_mpris_task()
             self._render_layout(stdscr)
 
             # Handle input or auto-advance
@@ -801,15 +836,19 @@ def run(
         print(str(error))
         return 1
 
+    players: list[Player3Column] = []
     try:
 
         def _main(stdscr: curses._CursesWindow) -> None:
             player = Player3Column(
                 library, settings, backend, settings_path=settings_path
             )
+            players.append(player)
             player.run_loop(stdscr)
 
         curses.wrapper(_main)
         return 0
     finally:
+        if players and players[0]._mpris_service is not None:
+            players[0]._mpris_service.shutdown()
         backend.shutdown()
