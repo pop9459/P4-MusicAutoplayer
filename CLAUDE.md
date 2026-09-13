@@ -30,9 +30,12 @@ Library commands (manage tracked folders; the source of truth for `play`):
 python -m src.cli add-folder --path /path/to/music     # recursive scan; skips a path already tracked
 python -m src.cli list-folders
 python -m src.cli remove-folder --folder-id <folder-id>
+python -m src.cli analyze-bpm                            # detect tempo for tracks with no BPM tag
 ```
 
 Each defaults to `settings.json`'s `library_path`, or pass `--library path/to/library.json` explicitly. `add-folder` never writes to the scanned folder.
+
+`analyze-bpm` needs the **optional** `aubio` package (Arch: `sudo pacman -S python-aubio` — not `pip install aubio`, whose 0.4.9 fails to build against numpy 2.x). It is deliberately a separate command rather than part of `add-folder`, since it runs at ~0.2-0.5s/track. It is resumable (skips tracks that already have a BPM) and checkpoints every 50 tracks, so Ctrl-C is safe. Without it, `track_similarity` simply keeps skipping the bpm term and redistributes its weight.
 
 Debug CLI (`python -m src.cli --help` for full list) — these operate on a raw single-folder `--catalog` file, independent of the library, for quick inspection/scripting:
 
@@ -82,6 +85,7 @@ There is no build step or lint configuration in this repo.
 - `src/settings.py` validates version-1 `settings.json` and resolves relative paths (including `library_path`) against the settings file's directory. `catalog_path`/`music_directory`/`music_folders` are retained only as legacy/migration fields (see Settings above) — `library_path` is the only field the TUI/library commands treat as authoritative.
 - `src/cli.py` wires settings, the library, and recommender operations into `python -m src.cli` commands. The `play` command launches the 3-column TUI against a `Library`; `add-folder`/`list-folders`/`remove-folder` manage tracked folders; the remaining debug commands still operate on a raw `--catalog` file.
 - `src/player.py` contains `PlayerEngine` — stateful queue/playback logic and track filtering, testable without curses or mpv.
+- `src/bpm_analyzer.py` detects tempo from the audio via an optional, lazily-imported `aubio`, for libraries whose files carry no BPM tag (the common case). Stores the raw estimate — half/double-time equivalence is handled by `_bpm_similarity`'s circular log2 distance, not by folding the stored value, which would put a seam in the middle of the scale. Resumable via `tracks_needing_bpm`; `analyze_tracks` checkpoints through a callback so the CLI can persist partial results.
 - `src/mpv_backend.py` controls one background `mpv` process over its Unix JSON IPC socket.
 - `src/mpris_service.py` runs an `org.mpris.MediaPlayer2` D-Bus service on a background thread (`dbus-next`, asyncio-based) so hardware media keys (Play/Pause, Next) control playback even when the terminal isn't OS-focused. The D-Bus thread never touches curses/mpv/`PlayerEngine` directly: it pushes requested actions onto a lock-guarded `MprisActionQueue`, drained once per `run_loop` tick by `Player3Column._poll_mpris_task`, which applies them through the same methods a keypress would use. Fails soft (no session bus, `dbus-next` missing) rather than raising, so `Player3Column` construction stays safe for tests.
 
@@ -97,7 +101,7 @@ There is no build step or lint configuration in this repo.
 
 ## Key conventions
 
-- Keep the product local, offline, single-user, and metadata-based; do not introduce cloud services, accounts, listening-history models, or collaborative filtering.
+- Keep the product local, offline, and single-user; do not introduce cloud services, accounts, listening-history models, or collaborative filtering. This is a privacy/locality constraint, not a ban on reading the audio: local analysis that writes into a local field (as `analyze-bpm` does) is in scope, external lookups are not.
 - Similarity is computed per pair from metadata (`track_similarity`), not from a persisted vector in a shared feature space. `Catalog.track_features` is a derived in-memory cache rebuilt on every load, so a canonicalization fix applies on the next run without rescanning any folder; `Catalog.genres`/`artists`/`bpm_min`/`bpm_max`/`year_min`/`year_max` survive only as descriptive fields for `summary`. `add_folder`/`remove_folder` still rebuild the merged catalog across the whole `Library`, not per folder.
 - `enabled` is the eligibility gate: ranking, queueing, and selectable player tracks must exclude disabled records. Queues exclude every track already selected in that queue, but a player refill starts a new recommendation queue from the current track.
 - Preserve catalog serialization compatibility: `CATALOG_VERSION` and `LIBRARY_VERSION` are `2`, settings `version` is `1`; `save_catalog`/`save_library` emit indented, ASCII JSON with a final newline. A v1 file still loads — its per-track `feature_vector` is ignored and dropped on the next save.

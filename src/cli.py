@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from . import player_ui_v2
+from .bpm_analyzer import BpmAnalyzerUnavailableError, analyze_tracks, require_aubio, tracks_needing_bpm
 from .library import (
     Library,
     add_folder,
@@ -201,6 +202,49 @@ def _command_list_folders(args: argparse.Namespace, settings: Settings | None = 
     print(f"{len(library.folders)} folders, {len(library.catalog.tracks)} tracks total.")
 
 
+def _command_analyze_bpm(args: argparse.Namespace, settings: Settings | None = None) -> None:
+    library_path = _resolve_library_path(args, settings)
+    library = load_library(library_path)
+    pending = tracks_needing_bpm(library.catalog.tracks)
+    already = len(library.catalog.tracks) - len(pending)
+
+    if not pending:
+        print(f"All {len(library.catalog.tracks)} tracks already have a BPM. Nothing to do.")
+        return
+
+    try:
+        require_aubio()
+    except BpmAnalyzerUnavailableError as error:
+        raise SystemExit(str(error)) from error
+
+    print(f"{len(pending)} tracks need a BPM ({already} already done). Roughly {len(pending) * 0.4 / 60:.0f} min.")
+    print("Safe to interrupt: progress is saved as it goes and a re-run picks up where it left off.")
+
+    def _save() -> None:
+        # The catalog is rebuilt so the derived feature cache picks up the
+        # new tempi; tracks already hold the values, so this is cheap.
+        library.catalog = build_catalog(library.catalog.tracks)
+        save_library(library, library_path)
+
+    def _progress(index: int, total: int, track: TrackRecord) -> None:
+        print(f"\r[{index}/{total}] {index * 100 // total}%  {track.title[:48]:<48}", end="", flush=True)
+
+    try:
+        analyzed, failed = analyze_tracks(pending, on_checkpoint=_save, on_progress=_progress)
+    except KeyboardInterrupt:
+        _save()
+        print(f"\nInterrupted. Progress saved to {library_path}; re-run to continue.")
+        return
+
+    print(f"\nAnalyzed {analyzed} tracks. Library saved to {library_path}.")
+    if failed:
+        print(f"{len(failed)} tracks had no detectable tempo:")
+        for track in failed[:10]:
+            print(f"  {_format_track(track)}")
+        if len(failed) > 10:
+            print(f"  ... and {len(failed) - 10} more")
+
+
 def _command_remove_folder(args: argparse.Namespace, settings: Settings | None = None) -> None:
     library_path = _resolve_library_path(args, settings)
     library = load_library(library_path)
@@ -276,6 +320,13 @@ def build_parser() -> argparse.ArgumentParser:
     remove_folder_parser.add_argument("--library", type=Path, help="Path to library.json. Defaults to settings.json.")
     remove_folder_parser.set_defaults(handler=_command_remove_folder)
 
+    analyze_bpm_parser = subparsers.add_parser(
+        "analyze-bpm",
+        help="Detect tempo for library tracks with no BPM (needs the optional 'aubio' package).",
+    )
+    analyze_bpm_parser.add_argument("--library", type=Path, help="Path to library.json. Defaults to settings.json.")
+    analyze_bpm_parser.set_defaults(handler=_command_analyze_bpm)
+
     return parser
 
 
@@ -294,7 +345,7 @@ def _apply_settings_defaults(args: argparse.Namespace, settings: Settings) -> No
         args.max_consecutive_artist = settings.max_consecutive_same_artist
 
 
-_LIBRARY_COMMANDS = {"add-folder", "list-folders", "remove-folder"}
+_LIBRARY_COMMANDS = {"add-folder", "list-folders", "remove-folder", "analyze-bpm"}
 
 
 def _needs_settings(args: argparse.Namespace) -> bool:
