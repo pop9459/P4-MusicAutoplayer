@@ -18,7 +18,7 @@ from .track_analyzer import (
     scan_library_with_progress,
 )
 
-LIBRARY_VERSION = 1
+LIBRARY_VERSION = 2
 ALL_TRACKS_FOLDER_ID = "__all__"
 
 
@@ -78,8 +78,11 @@ class Library:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        # Always stamp the current version: what gets written is always the
+        # current shape, so carrying a loaded v1 file's number through would
+        # label an already-migrated file as v1.
         return {
-            "version": self.version,
+            "version": LIBRARY_VERSION,
             "folders": [folder.to_dict() for folder in self.folders],
             "catalog": self.catalog.to_dict(),
         }
@@ -221,7 +224,6 @@ def migrate_settings_to_library(settings: Settings, settings_path: Path) -> Libr
                 bpm=track.bpm,
                 year=track.year,
                 enabled=track.enabled,
-                feature_vector=track.feature_vector,
                 folder_id=folder_id,
             )
         )

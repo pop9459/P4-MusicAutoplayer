@@ -15,15 +15,14 @@ except ImportError:  # pragma: no cover - exercised only when dependency missing
     mutagen = None
 
 SUPPORTED_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".wav", ".ogg", ".aac"}
-CATALOG_VERSION = 1
+CATALOG_VERSION = 2
 _YEAR_PATTERN = re.compile(r"(\d{4})")
 
-# Relative influence of each feature block on recommendation similarity.
-# Weights sum to 1.0. Each block's vector is scaled by sqrt(weight) before
-# concatenation, so its contribution to a cosine-similarity dot product
-# scales by exactly `weight`. Without this, one-hot genre/artist blocks
-# implicitly dominate over small 0..1 numeric features (bpm/year), and a
-# same-artist match alone can trivially produce near-maximal similarity.
+# Relative influence of each metadata signal on recommendation similarity.
+# Weights sum to 1.0, and `track_similarity` renormalizes them per pair over
+# only the signals both tracks actually carry -- so a library with no BPM tags
+# at all scores sanely without retuning anything, and tempo starts pulling its
+# full weight the moment the tags exist.
 FEATURE_WEIGHTS = {
     "genre": 0.35,
     "bpm": 0.25,
@@ -31,17 +30,10 @@ FEATURE_WEIGHTS = {
     "artist": 0.20,
 }
 
-
-def _scale_block(values: list[float], weight: float) -> list[float]:
-    scale = math.sqrt(weight)
-    return [value * scale for value in values]
-
-
-def _normalize_vector_l2(values: list[float]) -> list[float]:
-    magnitude = math.sqrt(sum(value * value for value in values))
-    if magnitude == 0.0:
-        return values
-    return [value / magnitude for value in values]
+# Decay constants for the numeric similarity terms, in the units of the
+# feature itself: a gap of this size scores ~0.37, double it ~0.14.
+_YEAR_DECAY = 12.0
+_BPM_OCTAVE_DECAY = 0.12
 
 
 # Hand-authored similarity between related genre families (symmetric,
@@ -347,12 +339,13 @@ class TrackRecord:
     bpm: float | None = None
     year: int | None = None
     enabled: bool = True
-    feature_vector: list[float] = field(default_factory=list)
     folder_id: str = ""
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TrackRecord":
-        feature_vector = payload.get("feature_vector") or []
+        # A pre-v2 catalog carries a precomputed "feature_vector" per track.
+        # It is deliberately ignored and dropped on the next save: similarity
+        # is now computed per pair from the metadata itself.
         return cls(
             id=str(payload["id"]),
             path=str(payload["path"]),
@@ -363,9 +356,101 @@ class TrackRecord:
             bpm=_coerce_float(payload.get("bpm")),
             year=_coerce_int(payload.get("year")),
             enabled=bool(payload.get("enabled", True)),
-            feature_vector=[float(value) for value in feature_vector],
             folder_id=str(payload.get("folder_id", "")),
         )
+
+
+@dataclass(slots=True, frozen=True)
+class TrackFeatures:
+    """Everything `track_similarity` needs about one track, precomputed.
+
+    Derived on load rather than persisted (see `Catalog.track_features`), so
+    a canonicalization fix takes effect on the next run instead of requiring
+    a full rescan of every tracked folder.
+    """
+
+    genre: str
+    subfamily: str | None
+    family: str | None
+    artist_keys: frozenset[str]
+    year: int | None
+    bpm: float | None
+
+
+def _features_for(track: TrackRecord) -> TrackFeatures:
+    genre = canonicalize_genre(track.genre)
+    subfamily, family = genre_grouping(genre)
+    artist = _canonicalize_artist(track.artist)
+    return TrackFeatures(
+        genre=genre,
+        subfamily=subfamily,
+        family=family,
+        artist_keys=frozenset({artist.casefold()}),
+        year=track.year,
+        bpm=track.bpm,
+    )
+
+
+def _artist_similarity(a: TrackFeatures, b: TrackFeatures) -> float | None:
+    if not a.artist_keys or not b.artist_keys:
+        return None
+    return 1.0 if a.artist_keys == b.artist_keys else 0.0
+
+
+def _year_similarity(a: TrackFeatures, b: TrackFeatures) -> float | None:
+    """Similarity as a function of the *gap* between two release years.
+
+    Encoding year as a single scaled scalar inside a cosine vector made it a
+    recency signal rather than a similarity one: two 2024 tracks scored a huge
+    match while two 1960 tracks scored almost nothing for exactly the same
+    zero-year gap. An explicit decay over |difference| has no such asymmetry.
+    """
+    if a.year is None or b.year is None:
+        return None
+    return math.exp(-abs(a.year - b.year) / _YEAR_DECAY)
+
+
+def _bpm_similarity(a: TrackFeatures, b: TrackFeatures) -> float | None:
+    """Similarity as a circular distance in octaves, so 90 and 180 BPM match.
+
+    Half/double-time is a tagging and beat-detection ambiguity, not a real
+    tempo difference -- a track counted at 174 and the same groove counted at
+    87 should not sit at opposite ends of the scale. Wrapping the log2 ratio
+    makes the two equivalent without folding (and so distorting) the stored
+    value, which would otherwise put a seam between 138 and 142 BPM.
+    """
+    if not a.bpm or not b.bpm or a.bpm <= 0 or b.bpm <= 0:
+        return None
+    octaves = abs(math.log2(a.bpm / b.bpm)) % 1.0
+    distance = min(octaves, 1.0 - octaves)
+    return math.exp(-distance / _BPM_OCTAVE_DECAY)
+
+
+def track_similarity(a: TrackFeatures, b: TrackFeatures) -> float:
+    """Weighted similarity in [0, 1] between two tracks' metadata.
+
+    Each term is an independent 0..1 signal; a term where either side has no
+    usable data is skipped and the remaining weights are renormalized over
+    what is left. That per-pair renormalization is why one weight table works
+    whether or not the library has BPM tags: with none, genre/artist/year
+    simply share the whole budget between them.
+    """
+    total_weight = 0.0
+    total_score = 0.0
+    for name, term in (
+        ("genre", _genre_similarity(a.genre, b.genre)),
+        ("bpm", _bpm_similarity(a, b)),
+        ("year", _year_similarity(a, b)),
+        ("artist", _artist_similarity(a, b)),
+    ):
+        if term is None:
+            continue
+        weight = FEATURE_WEIGHTS[name]
+        total_weight += weight
+        total_score += weight * term
+    if total_weight == 0.0:
+        return 0.0
+    return total_score / total_weight
 
 
 @dataclass(slots=True)
@@ -378,11 +463,11 @@ class Catalog:
     bpm_max: float | None
     year_min: int | None
     year_max: int | None
-    # Cached per-track feature-vector L2 norms, keyed by track id. Not
-    # persisted (see to_dict) -- it's a derived, in-memory-only speedup for
-    # predictor.rank_candidates_by_vector, which otherwise recomputes each
-    # track's norm on every ranking call (queue_length times per session).
-    track_norms: dict[str, float] = field(default_factory=dict)
+    # Per-track precomputed similarity inputs, keyed by track id. Not
+    # persisted (see to_dict): deriving it on load costs ~10ms for a
+    # 2600-track library and means a canonicalization fix applies on the
+    # next run instead of needing every tracked folder rescanned.
+    track_features: dict[str, TrackFeatures] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "Catalog":
@@ -397,12 +482,32 @@ class Catalog:
             bpm_max=_coerce_float(feature_space.get("bpm_max")),
             year_min=_coerce_int(feature_space.get("year_min")),
             year_max=_coerce_int(feature_space.get("year_max")),
-            track_norms=_compute_track_norms(tracks),
+            track_features=_compute_track_features(tracks),
         )
 
+    def features_for(self, track: TrackRecord) -> TrackFeatures:
+        """Cached features for a track, derived on demand if absent.
+
+        A `Catalog` built directly (in tests, or by an older code path) may
+        have an empty cache; ranking must still work rather than silently
+        skipping every track.
+        """
+        cached = self.track_features.get(track.id)
+        if cached is None:
+            cached = _features_for(track)
+            self.track_features[track.id] = cached
+        return cached
+
     def to_dict(self) -> dict[str, Any]:
+        # "feature_space" is descriptive only since v2 -- similarity no longer
+        # depends on a shared vector space, so these are kept for `summary`
+        # and for a human reading the file, not consumed by scoring.
+        #
+        # The version written is always the current one: what gets written is
+        # always the current shape, so carrying a loaded v1 file's number
+        # through would label an already-migrated file as v1.
         return {
-            "version": self.version,
+            "version": CATALOG_VERSION,
             "feature_space": {
                 "genres": self.genres,
                 "artists": self.artists,
@@ -431,49 +536,6 @@ def _coerce_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _normalize_numeric(value: float | int | None, minimum: float | int | None, maximum: float | int | None) -> float:
-    if value is None or minimum is None or maximum is None:
-        return 0.0
-    if maximum == minimum:
-        return 0.0
-    clipped_value = max(float(minimum), min(float(maximum), float(value)))
-    return (clipped_value - float(minimum)) / (float(maximum) - float(minimum))
-
-
-def _percentile(sorted_values: list[float], fraction: float) -> float:
-    if len(sorted_values) == 1:
-        return sorted_values[0]
-    position = (len(sorted_values) - 1) * fraction
-    lower_index = math.floor(position)
-    upper_index = math.ceil(position)
-    if lower_index == upper_index:
-        return sorted_values[int(position)]
-    lower_weight = upper_index - position
-    upper_weight = position - lower_index
-    return sorted_values[lower_index] * lower_weight + sorted_values[upper_index] * upper_weight
-
-
-# A single mistagged/outlier BPM value (e.g. a corrupt ID3 tag) would
-# otherwise stretch bpm_min/bpm_max across the whole library, compressing
-# every other track's normalized BPM into a narrow band. Clipping to the
-# 5th-95th percentile keeps the scale representative of the bulk of the
-# library; _normalize_numeric then clips each track's own value into
-# [bpm_min, bpm_max] so true outliers just saturate at 0.0/1.0 instead of
-# distorting everyone else.
-_BPM_OUTLIER_PERCENTILE = 0.05
-
-
-def _bpm_bounds(bpm_values: list[float]) -> tuple[float | None, float | None]:
-    if not bpm_values:
-        return None, None
-    sorted_values = sorted(bpm_values)
-    bpm_min = _percentile(sorted_values, _BPM_OUTLIER_PERCENTILE)
-    bpm_max = _percentile(sorted_values, 1.0 - _BPM_OUTLIER_PERCENTILE)
-    if bpm_max <= bpm_min:
-        return sorted_values[0], sorted_values[-1]
-    return bpm_min, bpm_max
 
 
 def _scan_one(path: Path, folder_id: str = "") -> TrackRecord:
@@ -539,48 +601,16 @@ def _build_feature_space(tracks: Iterable[TrackRecord]) -> tuple[list[str], list
     bpm_values = [track.bpm for track in tracks if track.bpm is not None]
     year_values = [track.year for track in tracks if track.year is not None]
 
-    bpm_min, bpm_max = _bpm_bounds(bpm_values)
+    bpm_min = min(bpm_values) if bpm_values else None
+    bpm_max = max(bpm_values) if bpm_values else None
     year_min = min(year_values) if year_values else None
     year_max = max(year_values) if year_values else None
 
     return genres, artists, bpm_min, bpm_max, year_min, year_max
 
 
-def _build_feature_vector(
-    track: TrackRecord,
-    genres: list[str],
-    artists: list[str],
-    bpm_min: float | None,
-    bpm_max: float | None,
-    year_min: int | None,
-    year_max: int | None,
-) -> list[float]:
-    genre = canonicalize_genre(track.genre)
-    artist = _canonicalize_artist(track.artist)
-    genre_vector = _normalize_vector_l2([_genre_similarity(genre, value) for value in genres])
-    artist_vector = [1.0 if artist == value else 0.0 for value in artists]
-    bpm_value = [_normalize_numeric(track.bpm, bpm_min, bpm_max)]
-    year_value = [_normalize_numeric(track.year, year_min, year_max)]
-
-    # Scale each block by sqrt(weight) so its contribution to a cosine-
-    # similarity dot product scales by exactly `weight`. Without this,
-    # concatenated one-hot blocks (genre/artist) implicitly dominate over
-    # small 0..1 numeric features, and "same artist" alone can trivially
-    # produce near-maximal similarity. See FEATURE_WEIGHTS.
-    genre_vector = _scale_block(genre_vector, FEATURE_WEIGHTS["genre"])
-    artist_vector = _scale_block(artist_vector, FEATURE_WEIGHTS["artist"])
-    bpm_value = _scale_block(bpm_value, FEATURE_WEIGHTS["bpm"])
-    year_value = _scale_block(year_value, FEATURE_WEIGHTS["year"])
-
-    return genre_vector + artist_vector + bpm_value + year_value
-
-
-def _compute_track_norms(tracks: Iterable[TrackRecord]) -> dict[str, float]:
-    return {
-        track.id: math.sqrt(sum(value * value for value in track.feature_vector))
-        for track in tracks
-        if track.feature_vector
-    }
+def _compute_track_features(tracks: Iterable[TrackRecord]) -> dict[str, TrackFeatures]:
+    return {track.id: _features_for(track) for track in tracks}
 
 
 def build_catalog(tracks: Iterable[TrackRecord]) -> Catalog:
@@ -600,7 +630,6 @@ def build_catalog(tracks: Iterable[TrackRecord]) -> Catalog:
                 bpm=track.bpm,
                 year=track.year,
                 enabled=track.enabled,
-                feature_vector=_build_feature_vector(track, genres, artists, bpm_min, bpm_max, year_min, year_max),
                 folder_id=track.folder_id,
             )
         )
@@ -614,7 +643,7 @@ def build_catalog(tracks: Iterable[TrackRecord]) -> Catalog:
         bpm_max=bpm_max,
         year_min=year_min,
         year_max=year_max,
-        track_norms=_compute_track_norms(enriched_tracks),
+        track_features=_compute_track_features(enriched_tracks),
     )
 
 

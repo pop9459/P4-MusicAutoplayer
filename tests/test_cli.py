@@ -35,7 +35,8 @@ class CliTests(unittest.TestCase):
     def test_summary_displays_catalog_statistics(self) -> None:
         output = self._run("summary", "--catalog", str(self.catalog_path))
         self.assertIn("Tracks: 3 (2 enabled, 1 disabled)", output)
-        self.assertIn("Feature vector size:", output)
+        self.assertIn("grouped into a family", output)
+        self.assertIn("Tracks with an ungrouped genre:", output)
 
     def test_list_tracks_honors_enabled_only(self) -> None:
         output = self._run("list-tracks", "--catalog", str(self.catalog_path), "--enabled-only")

@@ -19,7 +19,15 @@ from .library import (
 )
 from .predictor import generate_queue, rank_candidates, recommend_next_track
 from .settings import DEFAULT_SETTINGS_PATH, Settings, load_settings
-from .track_analyzer import Catalog, TrackRecord, build_catalog, load_catalog, save_catalog, scan_library
+from .track_analyzer import (
+    Catalog,
+    TrackRecord,
+    build_catalog,
+    genre_grouping,
+    load_catalog,
+    save_catalog,
+    scan_library,
+)
 
 
 def _positive_int(value: str) -> int:
@@ -66,11 +74,12 @@ def _load_or_build_catalog(catalog_path: Path, music_dir: Path | None) -> Catalo
 
 def _print_summary(catalog: Catalog) -> None:
     enabled_count = sum(track.enabled for track in catalog.tracks)
-    vector_size = len(catalog.tracks[0].feature_vector) if catalog.tracks else 0
+    grouped_labels = sum(1 for genre in catalog.genres if genre_grouping(genre) != (None, None))
+    ungrouped_tracks = sum(1 for track in catalog.tracks if genre_grouping(track.genre) == (None, None))
     print(f"Catalog version: {catalog.version}")
     print(f"Tracks: {len(catalog.tracks)} ({enabled_count} enabled, {len(catalog.tracks) - enabled_count} disabled)")
-    print(f"Feature vector size: {vector_size}")
-    print(f"Genres: {len(catalog.genres)}")
+    print(f"Genres: {len(catalog.genres)} ({grouped_labels} grouped into a family)")
+    print(f"Tracks with an ungrouped genre: {ungrouped_tracks}")
     print(f"Artists: {len(catalog.artists)}")
     print(f"BPM range: {catalog.bpm_min if catalog.bpm_min is not None else 'unknown'} to {catalog.bpm_max if catalog.bpm_max is not None else 'unknown'}")
     print(f"Year range: {catalog.year_min if catalog.year_min is not None else 'unknown'} to {catalog.year_max if catalog.year_max is not None else 'unknown'}")
@@ -101,10 +110,12 @@ def _command_inspect_track(args: argparse.Namespace) -> None:
     print(_format_track(track))
     print(f"Path: {track.path}")
     print(f"Album: {track.album or 'unknown'}")
-    print(f"Genre: {track.genre}")
+    features = catalog.features_for(track)
+    subfamily, family = features.subfamily, features.family
+    print(f"Genre: {track.genre} (family: {family or 'none'} / {subfamily or 'none'})")
     print(f"BPM: {track.bpm if track.bpm is not None else 'unknown'}")
     print(f"Year: {track.year if track.year is not None else 'unknown'}")
-    print(f"Feature vector ({len(track.feature_vector)} values): {track.feature_vector}")
+    print(f"Artist keys: {', '.join(sorted(features.artist_keys))}")
 
 
 def _command_recommend(args: argparse.Namespace) -> None:

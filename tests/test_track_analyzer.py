@@ -1,5 +1,5 @@
-"""Tests for src/track_analyzer.py: genre canonicalization, tag extraction,
-and feature-vector weighting.
+"""Tests for src/track_analyzer.py: genre canonicalization, genre grouping,
+tag extraction, and the weighted per-pair similarity terms.
 """
 from __future__ import annotations
 
@@ -7,11 +7,10 @@ import math
 import unittest
 from unittest.mock import patch
 
-from src.predictor import cosine_similarity, rank_candidates
+from src.predictor import rank_candidates
 from src.track_analyzer import (
     FEATURE_WEIGHTS,
     TrackRecord,
-    _build_feature_vector,
     _genre_similarity,
     _parse_bpm_from_tag,
     _parse_year_from_tag,
@@ -19,7 +18,16 @@ from src.track_analyzer import (
     build_catalog,
     canonicalize_genre,
     genre_grouping,
+    track_similarity,
 )
+
+
+def _features(**kwargs: object):
+    """Build a catalog of one track and return its derived features."""
+    defaults = dict(id="t", path="/t.mp3", title="T", artist="A", genre="pop")
+    defaults.update(kwargs)  # type: ignore[arg-type]
+    catalog = build_catalog([TrackRecord(**defaults)])  # type: ignore[arg-type]
+    return catalog.features_for(catalog.tracks[0])
 
 
 class CanonicalizeGenreTests(unittest.TestCase):
@@ -151,49 +159,53 @@ class ReadTagMetadataTests(unittest.TestCase):
         self.assertEqual(result, {})
 
 
-class FeatureVectorWeightingTests(unittest.TestCase):
+class SimilarityTermTests(unittest.TestCase):
     def test_weights_sum_to_one(self) -> None:
         self.assertAlmostEqual(sum(FEATURE_WEIGHTS.values()), 1.0)
 
-    def test_block_scaling_matches_sqrt_weight(self) -> None:
-        track = TrackRecord(id="a", path="/a.mp3", title="A", artist="Artist1", genre="rock", bpm=120, year=2020)
-        genres = ["rock", "unknown"]
-        artists = ["Artist1", "unknown"]
-        vector = _build_feature_vector(track, genres, artists, bpm_min=100, bpm_max=140, year_min=2000, year_max=2020)
+    def test_weights_renormalize_over_available_terms(self) -> None:
+        # Neither track has a BPM tag, so the bpm term is skipped entirely
+        # and its weight is redistributed rather than silently scoring 0.
+        # Same genre and artist, 12 years apart: genre 1.0, artist 1.0,
+        # year exp(-1), over the genre+artist+year weights only.
+        a = _features(id="a", path="/a.mp3", genre="rock", artist="X", year=2000)
+        b = _features(id="b", path="/b.mp3", genre="rock", artist="X", year=2012)
 
-        # genre block (len 2) + artist block (len 2) + bpm (1) + year (1) = 6
-        self.assertEqual(len(vector), 6)
-        genre_scale = math.sqrt(FEATURE_WEIGHTS["genre"])
-        artist_scale = math.sqrt(FEATURE_WEIGHTS["artist"])
-        bpm_scale = math.sqrt(FEATURE_WEIGHTS["bpm"])
-        year_scale = math.sqrt(FEATURE_WEIGHTS["year"])
+        available = FEATURE_WEIGHTS["genre"] + FEATURE_WEIGHTS["artist"] + FEATURE_WEIGHTS["year"]
+        expected = (
+            FEATURE_WEIGHTS["genre"] * 1.0
+            + FEATURE_WEIGHTS["artist"] * 1.0
+            + FEATURE_WEIGHTS["year"] * math.exp(-1.0)
+        ) / available
+        self.assertAlmostEqual(track_similarity(a, b), expected)
 
-        self.assertAlmostEqual(vector[0], genre_scale)  # matches "rock"
-        self.assertAlmostEqual(vector[1], 0.0)
-        self.assertAlmostEqual(vector[2], artist_scale)  # matches "artist1"
-        self.assertAlmostEqual(vector[3], 0.0)
-        self.assertAlmostEqual(vector[4], 0.5 * bpm_scale)  # (120-100)/(140-100) = 0.5
-        self.assertAlmostEqual(vector[5], 1.0 * year_scale)  # (2020-2000)/(2020-2000) = 1.0
+    def test_missing_term_on_one_side_is_skipped_not_scored_zero(self) -> None:
+        # A track with no year must not be penalised against a track that
+        # has one -- that would make untagged tracks look dissimilar to
+        # everything rather than simply unmeasured on that axis.
+        tagged = _features(id="a", path="/a.mp3", genre="rock", artist="X", year=2000)
+        untagged = _features(id="b", path="/b.mp3", genre="rock", artist="X", year=None)
 
-    def test_bpm_outlier_does_not_stretch_normalization_for_the_rest_of_the_library(self) -> None:
-        # One badly-tagged 300 BPM track shouldn't compress every normal
-        # track's bpm block into a narrow band near 0.
-        tracks = [
-            TrackRecord(id=f"t{i}", path=f"/{i}.mp3", title=str(i), artist="X", genre="rock", bpm=100 + i, year=2000)
-            for i in range(20)
-        ]
-        tracks.append(
-            TrackRecord(id="outlier", path="/o.mp3", title="Outlier", artist="X", genre="rock", bpm=300, year=2000)
-        )
-        catalog = build_catalog(tracks)
+        self.assertAlmostEqual(track_similarity(tagged, untagged), 1.0)
 
-        bpm_scale = math.sqrt(FEATURE_WEIGHTS["bpm"])
-        normalized_bpm_values = [
-            track.feature_vector[-2] / bpm_scale for track in catalog.tracks if track.id != "outlier"
-        ]
-        # Without clipping, normal tracks would all land under ~0.1 on a
-        # 100-300 scale. With percentile clipping they should spread out.
-        self.assertGreater(max(normalized_bpm_values) - min(normalized_bpm_values), 0.5)
+    def test_year_similarity_depends_on_the_gap_not_on_recency(self) -> None:
+        # The old scalar-in-a-cosine-vector encoding made two recent tracks
+        # score far higher than two old ones for the same zero-year gap.
+        recent_a = _features(id="a", path="/a.mp3", artist="X", year=2024)
+        recent_b = _features(id="b", path="/b.mp3", artist="X", year=2024)
+        old_a = _features(id="c", path="/c.mp3", artist="X", year=1960)
+        old_b = _features(id="d", path="/d.mp3", artist="X", year=1960)
+
+        self.assertAlmostEqual(track_similarity(recent_a, recent_b), track_similarity(old_a, old_b))
+
+    def test_bpm_similarity_treats_half_and_double_time_as_equivalent(self) -> None:
+        # 87 vs 174 BPM is a counting convention, not a tempo difference.
+        slow = _features(id="a", path="/a.mp3", artist="X", bpm=87.0)
+        fast = _features(id="b", path="/b.mp3", artist="X", bpm=174.0)
+        unrelated = _features(id="c", path="/c.mp3", artist="X", bpm=123.0)
+
+        self.assertAlmostEqual(track_similarity(slow, fast), 1.0)
+        self.assertLess(track_similarity(slow, unrelated), track_similarity(slow, fast))
 
     def test_same_genre_different_artist_scores_lower_than_same_artist_same_genre(self) -> None:
         # Same-artist/same-genre pair should score at or above a
@@ -242,20 +254,22 @@ class GenreAdjacencyTests(unittest.TestCase):
         ranked_ids = [track.id for track, _ in ranked]
 
         self.assertLess(ranked_ids.index("metal_track"), ranked_ids.index("classical_track"))
+        metal_score = next(score for track, score in ranked if track.id == "metal_track")
         classical_score = next(score for track, score in ranked if track.id == "classical_track")
-        self.assertAlmostEqual(classical_score, 0.0)
+        # The two candidates share bpm and year with the seed, so the gap
+        # between them is contributed entirely by the genre term.
+        self.assertAlmostEqual(metal_score - classical_score, FEATURE_WEIGHTS["genre"] * _genre_similarity("rock", "metal"))
 
     def test_exact_genre_match_similarity_is_unchanged_by_adjacency_table(self) -> None:
         # Two same-genre/same-everything-else tracks should still score a
-        # perfect match, same as under the old one-hot encoding: adjacency
-        # only matters when genres differ.
+        # perfect match: adjacency only matters when genres differ.
         catalog = build_catalog([
             TrackRecord(id="start", path="/start.mp3", title="Start", artist="A", genre="rock", bpm=120, year=2000),
             TrackRecord(id="match", path="/match.mp3", title="Match", artist="A", genre="rock", bpm=120, year=2000),
         ])
-        start_vector = next(t for t in catalog.tracks if t.id == "start").feature_vector
-        match_vector = next(t for t in catalog.tracks if t.id == "match").feature_vector
-        self.assertAlmostEqual(cosine_similarity(start_vector, match_vector), 1.0)
+        start = catalog.features_for(next(t for t in catalog.tracks if t.id == "start"))
+        match = catalog.features_for(next(t for t in catalog.tracks if t.id == "match"))
+        self.assertAlmostEqual(track_similarity(start, match), 1.0)
 
 
 if __name__ == "__main__":

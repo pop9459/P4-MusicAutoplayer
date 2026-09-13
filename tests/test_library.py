@@ -9,6 +9,7 @@ from pathlib import Path
 
 from src.library import (
     ALL_TRACKS_FOLDER_ID,
+    LIBRARY_VERSION,
     Library,
     LibraryFolder,
     add_folder,
@@ -40,7 +41,9 @@ class LibraryRoundTripTests(unittest.TestCase):
 
         restored = Library.from_dict(library.to_dict())
 
-        self.assertEqual(restored.version, 1)
+        # Saving always stamps the current version -- a v1 file that has been
+        # loaded and written back has already been migrated in the process.
+        self.assertEqual(restored.version, LIBRARY_VERSION)
         self.assertEqual(len(restored.folders), 1)
         self.assertEqual(restored.folders[0].id, "f1")
         self.assertEqual(len(restored.catalog.tracks), 1)
@@ -92,23 +95,22 @@ class AddFolderTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             add_folder(new_library(), self.root / "does_not_exist")
 
-    def test_add_folder_rebuilds_feature_space_over_all_tracks(self) -> None:
-        """Adding a second folder can shift existing tracks' vectors, since
-        genre/artist/bpm/year dimensions are recomputed over the whole
-        library, not just the newly added folder."""
+    def test_add_folder_rebuilds_the_catalog_over_all_tracks(self) -> None:
+        """Adding a folder rebuilds the merged catalog, not just the new
+        folder's slice: the recorded genre/artist sets and the derived
+        feature cache must cover every tracked folder afterwards."""
         folder_a = self.root / "music_a"
         _make_audio_file(folder_a / "ArtistA - SongA.mp3")
         library, folder_a_record, _ = add_folder(new_library(), folder_a)
-        vector_before = list(library.catalog.tracks[0].feature_vector)
+        artists_before = list(library.catalog.artists)
 
         folder_b = self.root / "music_b"
         _make_audio_file(folder_b / "ArtistB - SongB.mp3")
         library, _, _ = add_folder(library, folder_b)
 
+        self.assertGreater(len(library.catalog.artists), len(artists_before))
         existing_track = next(t for t in library.catalog.tracks if t.folder_id == folder_a_record.id)
-        # Artist one-hot dimensions grow from 2 (ArtistA, unknown) to 3
-        # (ArtistA, ArtistB, unknown), so the vector length itself changes.
-        self.assertNotEqual(len(vector_before), len(existing_track.feature_vector))
+        self.assertIn(existing_track.id, library.catalog.track_features)
 
     def test_add_folder_does_not_modify_the_external_folder(self) -> None:
         folder = self.root / "music_a"
