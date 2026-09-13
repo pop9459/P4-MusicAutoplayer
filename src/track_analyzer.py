@@ -392,6 +392,37 @@ class TrackRecord:
         )
 
 
+_BRACKETED = re.compile(r"\([^)]*\)|\[[^\]]*\]")
+_FEAT_TAIL = re.compile(r"\b(?:feat\.?|ft\.?|featuring|with)\b.*$", re.IGNORECASE)
+_NON_ALPHANUMERIC = re.compile(r"[^a-z0-9]+")
+
+
+def _base_title(title: str) -> str:
+    """Strip a title down to the underlying song, dropping version markers.
+
+    "Thunderstruck", "Thunderstruck (Live)" and "Thunderstruck - Radio Edit"
+    are three different tracks that must all stay in the library, but they
+    are one song and should never play back to back. Bracketed sections, a
+    trailing " - <version>" and a trailing feat. credit are exactly where
+    those markers live.
+    """
+    cleaned = _BRACKETED.sub(" ", title.casefold())
+    cleaned = cleaned.split(" - ", 1)[0]
+    cleaned = _FEAT_TAIL.sub(" ", cleaned)
+    return " ".join(_NON_ALPHANUMERIC.sub(" ", cleaned).split())
+
+
+def work_key(artist: str, title: str) -> str:
+    """Identity of the underlying song, shared by its versions and remixes.
+
+    Keyed on the *lead* credited artist rather than the whole credit string,
+    so "Skrillex - Rumble" and "Skrillex, Fred again.. - Rumble" resolve to
+    the same work.
+    """
+    lead = _ARTIST_SEPARATORS.split(artist, maxsplit=1)[0].strip().casefold()
+    return f"{lead}|{_base_title(title)}"
+
+
 @dataclass(slots=True, frozen=True)
 class TrackFeatures:
     """Everything `track_similarity` needs about one track, precomputed.
@@ -407,6 +438,7 @@ class TrackFeatures:
     artist_keys: frozenset[str]
     year: int | None
     bpm: float | None
+    work_key: str
 
 
 def _features_for(track: TrackRecord) -> TrackFeatures:
@@ -420,6 +452,7 @@ def _features_for(track: TrackRecord) -> TrackFeatures:
         artist_keys=_artist_keys(artist),
         year=track.year,
         bpm=track.bpm,
+        work_key=work_key(artist, track.title),
     )
 
 

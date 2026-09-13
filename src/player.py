@@ -122,8 +122,18 @@ class PlayerEngine:
         Excludes the current track, the entire play history, and everything
         already queued, so no track repeats within the session while there
         are still unseen tracks to recommend.
+
+        Separately suppresses other *versions* of a recently played song --
+        a duplicate from an overlapping folder, or a remix -- over a sliding
+        window rather than the whole session, since a third of the library
+        belongs to a multi-version group and banning them outright would put
+        much of it out of reach.
         """
         recent_artists = [track.artist for track in self.history] + [track.artist for track in self.queue]
+        recent_work_keys = [
+            self.catalog.features_for(track).work_key
+            for track in self.history[-self.queue_length :] + [self.current_track] + self.queue
+        ]
         while len(self.queue) < self.queue_length:
             reference_id = self.queue[-1].id if self.queue else self.current_track.id
             excluded_ids = {self.current_track.id}
@@ -139,12 +149,14 @@ class PlayerEngine:
                     excluded_track_ids=excluded_ids,
                     recent_artists=recent_artists,
                     max_consecutive_same_artist=self.max_consecutive_same_artist,
+                    recent_work_keys=recent_work_keys,
                 )
             except ValueError:
                 break
             with self._queue_lock:
                 self.queue.append(next_track)
             recent_artists.append(next_track.artist)
+            recent_work_keys.append(self.catalog.features_for(next_track).work_key)
             yield next_track
 
     def _top_up_queue(self) -> bool:

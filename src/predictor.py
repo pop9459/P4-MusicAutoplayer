@@ -81,6 +81,29 @@ def _apply_artist_repeat_cap(
     return filtered or ranked_candidates
 
 
+def _apply_work_key_cooldown(
+    ranked_candidates: Sequence[tuple[TrackRecord, float]],
+    catalog: Catalog,
+    recent_work_keys: Collection[str],
+) -> Sequence[tuple[TrackRecord, float]]:
+    """Drop candidates that are another version of a recently picked song.
+
+    Overlapping source folders mean the same song is often present several
+    times over, and a remix is a legitimately different track that must stay
+    in the library -- but both score near-identical metadata similarity to
+    the original, so ranking alone plays them back to back. This suppresses
+    a work only while it is recent; it stays reachable later in the session.
+
+    A queue-assembly filter like `_apply_artist_repeat_cap`, with the same
+    fall back to the unfiltered list so playback never stalls.
+    """
+    if not recent_work_keys:
+        return ranked_candidates
+    blocked = set(recent_work_keys)
+    filtered = [item for item in ranked_candidates if catalog.features_for(item[0]).work_key not in blocked]
+    return filtered or ranked_candidates
+
+
 def rank_candidates(
     current_track_id: str,
     catalog: Catalog,
@@ -130,8 +153,10 @@ def recommend_next_track(
     excluded_track_ids: Collection[str] = (),
     recent_artists: Sequence[str] = (),
     max_consecutive_same_artist: int | None = None,
+    recent_work_keys: Collection[str] = (),
 ) -> TrackRecord:
     ranked_candidates = rank_candidates(current_track_id, catalog, excluded_track_ids)
+    ranked_candidates = _apply_work_key_cooldown(ranked_candidates, catalog, recent_work_keys)
     ranked_candidates = _apply_artist_repeat_cap(ranked_candidates, recent_artists, max_consecutive_same_artist)
     if top_k > 0:
         ranked_candidates = ranked_candidates[:top_k]
@@ -184,6 +209,9 @@ def generate_queue_steps(
     played_track_ids = {current_track_id}
     previous_features = seed_features
     recent_artists = [seed_track.artist]
+    # One generated queue is itself the cooldown window: no song appears
+    # twice in it, in any version.
+    recent_work_keys = [seed_features.work_key]
 
     for _ in range(length):
         ranked_candidates = rank_candidates_by_features(
@@ -193,6 +221,7 @@ def generate_queue_steps(
             anchor=seed_features,
             anchor_weight=SEED_ANCHOR_WEIGHT,
         )
+        ranked_candidates = _apply_work_key_cooldown(ranked_candidates, catalog, recent_work_keys)
         ranked_candidates = _apply_artist_repeat_cap(ranked_candidates, recent_artists, max_consecutive_same_artist)
         if top_k > 0:
             ranked_candidates = ranked_candidates[:top_k]
@@ -201,7 +230,9 @@ def generate_queue_steps(
         next_track = _sample_weighted_candidates(ranked_candidates, randomness, random_generator)
         played_track_ids.add(next_track.id)
         recent_artists.append(next_track.artist)
-        previous_features = catalog.features_for(next_track)
+        next_features = catalog.features_for(next_track)
+        recent_work_keys.append(next_features.work_key)
+        previous_features = next_features
         yield next_track
 
 

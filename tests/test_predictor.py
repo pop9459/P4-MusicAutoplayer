@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import src.predictor as predictor_module
 from src.predictor import generate_queue, generate_queue_steps, rank_candidates_by_features
-from src.track_analyzer import Catalog, TrackRecord, build_catalog, track_similarity
+from src.track_analyzer import Catalog, TrackRecord, build_catalog, track_similarity, work_key
 
 
 class QueueGenerationTests(unittest.TestCase):
@@ -129,6 +129,65 @@ class ArtistRepeatCapTests(unittest.TestCase):
         # artist with the current streak.
         queue = generate_queue("solo0", single_artist_catalog, length=4, top_k=10, randomness=0.0)
         self.assertEqual(len(queue), 4)
+
+
+class WorkKeyTests(unittest.TestCase):
+    def test_version_markers_resolve_to_the_same_work(self) -> None:
+        base = work_key("ACDC", "Thunderstruck")
+        self.assertEqual(work_key("ACDC", "Thunderstruck (Live)"), base)
+        self.assertEqual(work_key("ACDC", "Thunderstruck - Radio Edit"), base)
+        self.assertEqual(work_key("ACDC", "Thunderstruck [Remastered]"), base)
+
+    def test_feat_credits_in_the_title_are_stripped(self) -> None:
+        self.assertEqual(
+            work_key("Mokaby", "The Passenger (LaLaLa) [feat. MokaBy]"),
+            work_key("Mokaby", "The Passenger"),
+        )
+
+    def test_lead_artist_decides_the_work_so_collaborations_group(self) -> None:
+        self.assertEqual(work_key("Skrillex, Fred again..", "Rumble"), work_key("Skrillex", "Rumble"))
+
+    def test_different_songs_keep_different_keys(self) -> None:
+        self.assertNotEqual(work_key("ACDC", "Thunderstruck"), work_key("ACDC", "Back in Black"))
+        self.assertNotEqual(work_key("ACDC", "Thunderstruck"), work_key("Queen", "Thunderstruck"))
+
+
+class WorkKeyCooldownTests(unittest.TestCase):
+    def _versions_catalog(self) -> Catalog:
+        # Three versions of one song plus enough unrelated-but-similar
+        # filler that the queue never has to fall back.
+        tracks = [
+            TrackRecord(id="orig", path="/o.mp3", title="Thunderstruck", artist="ACDC", genre="rock", year=1990),
+            TrackRecord(id="live", path="/l.mp3", title="Thunderstruck (Live)", artist="ACDC", genre="rock", year=1990),
+            TrackRecord(id="edit", path="/e.mp3", title="Thunderstruck - Radio Edit", artist="ACDC", genre="rock", year=1990),
+        ]
+        tracks += [
+            TrackRecord(id=f"f{i}", path=f"/f{i}.mp3", title=f"Filler {i}", artist=f"Band {i}", genre="rock", year=1990)
+            for i in range(6)
+        ]
+        return build_catalog(tracks)
+
+    def test_other_versions_of_the_seed_are_not_queued_next(self) -> None:
+        queue = generate_queue("orig", self._versions_catalog(), length=6, top_k=10, randomness=0.0)
+        self.assertNotIn("live", [t.id for t in queue[:2]])
+        self.assertNotIn("edit", [t.id for t in queue[:2]])
+
+    def test_a_queue_never_contains_two_versions_of_one_song(self) -> None:
+        catalog = self._versions_catalog()
+        # Six distinct works are reachable, so a six-track queue never has
+        # to fall back on a repeat.
+        queue = generate_queue("orig", catalog, length=6, top_k=10, randomness=0.0)
+        keys = [catalog.features_for(track).work_key for track in queue]
+        self.assertEqual(len(keys), len(set(keys)))
+
+    def test_cooldown_falls_back_rather_than_truncating_the_queue(self) -> None:
+        # A library where every track is a version of the same song must
+        # still produce a full queue instead of stalling.
+        catalog = build_catalog([
+            TrackRecord(id=f"v{i}", path=f"/v{i}.mp3", title=f"Song (Mix {i})", artist="A", genre="pop", year=2000)
+            for i in range(5)
+        ])
+        self.assertEqual(len(generate_queue("v0", catalog, length=4, top_k=10, randomness=0.0)), 4)
 
 
 class CatalogFeatureCacheTests(unittest.TestCase):
