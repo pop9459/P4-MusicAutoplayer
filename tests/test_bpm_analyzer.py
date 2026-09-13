@@ -6,6 +6,8 @@ here patches `detect_bpm` or `_load_aubio` rather than touching real audio.
 from __future__ import annotations
 
 import json
+import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,6 +17,7 @@ from src.bpm_analyzer import (
     BpmAnalyzerUnavailableError,
     analyze_tracks,
     detect_bpm,
+    start_bpm_task,
     tracks_needing_bpm,
 )
 from src.json_io import save_json
@@ -173,6 +176,72 @@ class AtomicSaveTests(unittest.TestCase):
                 save_json(path, {"bad": object()})
 
             self.assertEqual([p.name for p in Path(directory).iterdir()], ["library.json"])
+
+
+class BpmTaskTests(unittest.TestCase):
+    """The worker thread must never touch the catalog: it reads each track's
+    path and publishes results for the UI thread to apply."""
+
+    def _wait(self, task, timeout: float = 5.0) -> None:
+        self.assertTrue(task.done.wait(timeout), "background analysis did not finish")
+
+    def test_results_are_published_without_mutating_the_tracks(self) -> None:
+        tracks = [_track("a"), _track("b")]
+        with patch("src.bpm_analyzer.detect_bpm", return_value=120.0):
+            task = start_bpm_task(tracks)
+            self._wait(task)
+
+        self.assertEqual(task.drain(), {"a": 120.0, "b": 120.0})
+        self.assertEqual([t.bpm for t in tracks], [None, None])
+
+    def test_draining_takes_each_result_only_once(self) -> None:
+        tracks = [_track("a")]
+        with patch("src.bpm_analyzer.detect_bpm", return_value=120.0):
+            task = start_bpm_task(tracks)
+            self._wait(task)
+
+        self.assertEqual(task.drain(), {"a": 120.0})
+        self.assertEqual(task.drain(), {})
+
+    def test_progress_and_failures_are_counted(self) -> None:
+        tracks = [_track(str(i)) for i in range(4)]
+
+        def _detect(path: str) -> float | None:
+            return None if Path(path).stem in {"1", "2"} else 120.0
+
+        with patch("src.bpm_analyzer.detect_bpm", side_effect=_detect):
+            task = start_bpm_task(tracks)
+            self._wait(task)
+
+        self.assertEqual(task.progress(), (4, 4))
+        self.assertEqual(task.failed_count(), 2)
+
+    def test_cancelling_stops_the_run_early(self) -> None:
+        tracks = [_track(str(i)) for i in range(200)]
+        started = threading.Event()
+
+        def _slow(_path: str) -> float:
+            started.set()
+            time.sleep(0.01)
+            return 120.0
+
+        with patch("src.bpm_analyzer.detect_bpm", side_effect=_slow):
+            task = start_bpm_task(tracks)
+            self.assertTrue(started.wait(5.0))
+            task.cancel()
+            self._wait(task)
+
+        analyzed, total = task.progress()
+        self.assertEqual(total, 200)
+        self.assertLess(analyzed, 200)
+
+    def test_a_missing_dependency_is_reported_rather_than_raised_on_the_thread(self) -> None:
+        with patch("src.bpm_analyzer.require_aubio", side_effect=BpmAnalyzerUnavailableError("no aubio")):
+            task = start_bpm_task([_track("a")])
+            self._wait(task)
+
+        self.assertIsInstance(task.error[0], BpmAnalyzerUnavailableError)
+        self.assertEqual(task.progress(), (0, 1))
 
 
 if __name__ == "__main__":

@@ -692,3 +692,164 @@ class SettingsModeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BackgroundBpmAnalysisTests(unittest.TestCase):
+    """Tempo detection runs on a background thread while the player is open,
+    so the UI keeps rendering and playing through a run that takes tens of
+    minutes. The thread never touches the catalog: it publishes results that
+    the render loop drains and applies."""
+
+    def setUp(self) -> None:
+        self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.library = _library_from_catalog(self.catalog)
+        self.settings = load_settings()
+        self.backend = MagicMock(spec=MpvBackend)
+        for track in self.catalog.tracks:
+            track.bpm = None
+
+    def _player(self) -> Player3Column:
+        return Player3Column(self.library, self.settings, self.backend)
+
+    def test_pressing_b_in_the_folder_column_starts_analysis(self) -> None:
+        player = self._player()
+        with patch("src.player_ui_v2.start_bpm_task") as start:
+            player.handle_folder_input(ord("b"))
+
+        start.assert_called_once()
+        self.assertIn("Analyzing tempo", player.folder_panel.status_message)
+
+    def test_only_tracks_without_a_tempo_are_submitted(self) -> None:
+        self.catalog.tracks[0].bpm = 128.0
+        player = self._player()
+        with patch("src.player_ui_v2.start_bpm_task") as start:
+            player.handle_folder_input(ord("b"))
+
+        submitted = list(start.call_args[0][0])
+        self.assertNotIn(self.catalog.tracks[0].id, [t.id for t in submitted])
+        self.assertEqual(len(submitted), len(self.catalog.tracks) - 1)
+
+    def test_pressing_b_again_cancels_a_running_analysis(self) -> None:
+        player = self._player()
+        task = MagicMock()
+        with patch("src.player_ui_v2.start_bpm_task", return_value=task):
+            player.handle_folder_input(ord("b"))
+        player.handle_folder_input(ord("b"))
+
+        task.cancel.assert_called_once()
+
+    def test_nothing_to_do_is_reported_rather_than_starting_a_run(self) -> None:
+        for track in self.catalog.tracks:
+            track.bpm = 120.0
+        player = self._player()
+        with patch("src.player_ui_v2.start_bpm_task") as start:
+            player.handle_folder_input(ord("b"))
+
+        start.assert_not_called()
+        self.assertIn("already have a tempo", player.folder_panel.status_message)
+
+    def test_results_are_applied_and_invalidate_the_feature_cache(self) -> None:
+        player = self._player()
+        track = self.library.catalog.tracks[0]
+        self.library.catalog.features_for(track)  # warm the cache
+        self.assertIn(track.id, self.library.catalog.track_features)
+
+        with patch.object(player, "_save_bpm_results"):
+            player._apply_bpm_results({track.id: 128.0})
+
+        self.assertEqual(track.bpm, 128.0)
+        # Dropped rather than stale, so the next lookup re-derives with the
+        # tempo included.
+        self.assertNotIn(track.id, self.library.catalog.track_features)
+        self.assertEqual(self.library.catalog.features_for(track).bpm, 128.0)
+
+    def test_results_for_unknown_tracks_are_ignored(self) -> None:
+        player = self._player()
+        with patch.object(player, "_save_bpm_results"):
+            player._apply_bpm_results({"no-such-track": 128.0})  # must not raise
+
+    def test_progress_is_reported_while_running(self) -> None:
+        player = self._player()
+        task = MagicMock()
+        task.done.is_set.return_value = False
+        task.drain.return_value = {}
+        task.progress.return_value = (7, 40)
+        with patch("src.player_ui_v2.start_bpm_task", return_value=task):
+            player.handle_folder_input(ord("b"))
+
+        player._poll_bpm_task()
+
+        self.assertEqual(player.folder_panel.status_message, "Analyzing tempo: 7/40")
+
+    def test_partial_results_are_applied_before_the_run_finishes(self) -> None:
+        # A run over thousands of files should not withhold everything until
+        # it completes; an interrupted session keeps what it found.
+        player = self._player()
+        track = self.library.catalog.tracks[0]
+        task = MagicMock()
+        task.done.is_set.return_value = False
+        task.drain.return_value = {track.id: 96.0}
+        task.progress.return_value = (1, 40)
+        with patch("src.player_ui_v2.start_bpm_task", return_value=task):
+            player.handle_folder_input(ord("b"))
+
+        player._poll_bpm_task()
+
+        self.assertEqual(track.bpm, 96.0)
+
+    def test_finishing_saves_the_library_and_reports_a_summary(self) -> None:
+        player = self._player()
+        task = MagicMock()
+        task.done.is_set.return_value = True
+        task.drain.return_value = {}
+        task.progress.return_value = (40, 40)
+        task.failed_count.return_value = 3
+        task.cancelled.is_set.return_value = False
+        task.error = []
+        with patch("src.player_ui_v2.start_bpm_task", return_value=task):
+            player.handle_folder_input(ord("b"))
+
+        with patch("src.player_ui_v2.save_library") as save:
+            player._poll_bpm_task()
+
+        save.assert_called_once()
+        self.assertIsNone(player._bpm_task)
+        self.assertIn("37 detected", player.folder_panel.status_message)
+        self.assertIn("3 undetectable", player.folder_panel.status_message)
+
+    def test_quitting_keeps_results_detected_since_the_last_save(self) -> None:
+        # The worker is a daemon thread, so without this the tempi found
+        # since the last checkpoint would be discarded on exit.
+        player = self._player()
+        track = self.library.catalog.tracks[0]
+        task = MagicMock()
+        task.drain.return_value = {track.id: 101.0}
+        with patch("src.player_ui_v2.start_bpm_task", return_value=task):
+            player.handle_folder_input(ord("b"))
+
+        with patch("src.player_ui_v2.save_library") as save:
+            player._shutdown_bpm_task()
+
+        task.cancel.assert_called_once()
+        self.assertEqual(track.bpm, 101.0)
+        save.assert_called_once()
+
+    def test_adding_a_folder_is_refused_while_analysis_runs(self) -> None:
+        # add_folder rebuilds the catalog and replaces self.library, which
+        # would strand the results still being produced for the old one.
+        player = self._player()
+        with patch("src.player_ui_v2.start_bpm_task", return_value=MagicMock()):
+            player.handle_folder_input(ord("b"))
+
+        player.handle_folder_input(ord("a"))
+
+        self.assertFalse(player._adding_folder)
+        self.assertIn("Tempo analysis in progress", player.folder_panel.status_message)
+
+    def test_playback_controls_still_work_during_analysis(self) -> None:
+        player = self._player()
+        with patch("src.player_ui_v2.start_bpm_task", return_value=MagicMock()):
+            player.handle_folder_input(ord("b"))
+
+        self.assertTrue(player.handle_folder_input(ord(" ")))
+        self.assertFalse(player.handle_folder_input(ord("q")))

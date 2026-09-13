@@ -7,6 +7,7 @@ import random
 import shutil
 from pathlib import Path
 
+from .bpm_analyzer import BpmTask, start_bpm_task, tracks_needing_bpm
 from .folder_panel import FolderPanel
 from .library import (
     Library,
@@ -80,6 +81,9 @@ class Player3Column:
 
         self._scan_task: ScanTask | None = None
         self._adding_folder = False
+
+        self._bpm_task: BpmTask | None = None
+        self._bpm_applied_since_save = 0
 
         self._queue_task: QueueTask | None = None
         self._queue_task_last_revealed = -1
@@ -332,6 +336,8 @@ class Player3Column:
             self.active_column = 1
         elif key in (ord("a"), ord("A")):
             self._begin_add_folder_prompt()
+        elif key in (ord("b"), ord("B")):
+            self._toggle_bpm_analysis()
 
         return True
 
@@ -365,6 +371,12 @@ class Player3Column:
         if self._scan_task is not None:
             self.folder_panel.status_message = "Scan already in progress."
             return
+        if self._bpm_task is not None:
+            # Adding a folder rebuilds the merged catalog and replaces
+            # self.library, which would strand the results the analysis
+            # thread is still producing for the old one.
+            self.folder_panel.status_message = "Tempo analysis in progress (B to stop)."
+            return
         self._adding_folder = True
 
     def _begin_add_folder_scan(self, raw_path: str) -> None:
@@ -380,6 +392,104 @@ class Player3Column:
             return
         self.folder_panel.status_message = "Scanning: 0/0"
         self._scan_task = start_add_folder_task(self.library, path)
+
+    # How many newly detected tempi to accumulate before writing the library
+    # back out. Saving costs ~35ms on a 2600-track library, which is well
+    # inside one 200ms render tick, but a run lasting tens of minutes
+    # shouldn't rewrite the file after every single track either.
+    _BPM_SAVE_EVERY = 100
+
+    def _toggle_bpm_analysis(self) -> None:
+        """Start tempo detection in the background, or stop a running one."""
+        if self._bpm_task is not None:
+            self._bpm_task.cancel()
+            self.folder_panel.status_message = "Stopping tempo analysis..."
+            return
+        if self._scan_task is not None:
+            self.folder_panel.status_message = "Scan in progress."
+            return
+
+        pending = tracks_needing_bpm(self.library.catalog.tracks)
+        if not pending:
+            self.folder_panel.status_message = "All tracks already have a tempo."
+            return
+        self.folder_panel.status_message = f"Analyzing tempo: 0/{len(pending)}"
+        self._bpm_task = start_bpm_task(pending)
+
+    def _apply_bpm_results(self, results: dict[str, float]) -> None:
+        """Write detected tempi onto the live catalog, from the UI thread.
+
+        Dropping each updated track's cached features is what makes the new
+        tempo take effect: `Catalog.features_for` re-derives on the next
+        lookup. Queue generation may be reading the catalog from its own
+        thread meanwhile, but every value it can see is a valid one -- the
+        worst case is one pick scored with a tempo that arrived a moment
+        later.
+        """
+        if not results:
+            return
+        tracks_by_id = {track.id: track for track in self.library.catalog.tracks}
+        for track_id, bpm in results.items():
+            track = tracks_by_id.get(track_id)
+            if track is None:
+                continue
+            track.bpm = bpm
+            self.library.catalog.track_features.pop(track_id, None)
+        self._bpm_applied_since_save += len(results)
+
+    def _save_bpm_results(self) -> None:
+        self._bpm_applied_since_save = 0
+        try:
+            save_library(self.library, self.settings.library_path)
+        except OSError as error:
+            self.folder_panel.status_message = f"Save failed: {error}"
+
+    def _poll_bpm_task(self) -> None:
+        """Apply whatever tempo analysis has finished since the last tick."""
+        if self._bpm_task is None:
+            return
+
+        task = self._bpm_task
+        self._apply_bpm_results(task.drain())
+
+        if not task.done.is_set():
+            analyzed, total = task.progress()
+            self.folder_panel.status_message = f"Analyzing tempo: {analyzed}/{total}"
+            if self._bpm_applied_since_save >= self._BPM_SAVE_EVERY:
+                self._save_bpm_results()
+            return
+
+        self._bpm_task = None
+        self._save_bpm_results()
+
+        if task.error:
+            self.folder_panel.status_message = f"Tempo analysis failed: {task.error[0]}"
+            return
+
+        analyzed, total = task.progress()
+        failed = task.failed_count()
+        detected = analyzed - failed
+        if task.cancelled.is_set():
+            self.folder_panel.status_message = f"Tempo analysis stopped ({detected} of {total} done)."
+        elif failed:
+            self.folder_panel.status_message = f"Tempo: {detected} detected, {failed} undetectable."
+        else:
+            self.folder_panel.status_message = f"Tempo analysis done ({detected} tracks)."
+
+    def _shutdown_bpm_task(self) -> None:
+        """Stop analysis and keep whatever it already found.
+
+        The worker is a daemon thread, so quitting would otherwise discard
+        everything detected since the last save -- up to a hundred tracks.
+        """
+        if self._bpm_task is None:
+            return
+        task = self._bpm_task
+        self._bpm_task = None
+        task.cancel()
+        self._apply_bpm_results(task.drain())
+        if self._bpm_applied_since_save:
+            self._save_bpm_results()
 
     def _poll_scan_task(self) -> None:
         """Check on a running add-folder scan; apply its result once done."""
@@ -496,10 +606,17 @@ class Player3Column:
         stdscr.timeout(POLL_INTERVAL_MS)
         self._mpris_service = start_mpris_service()
 
+        try:
+            self._event_loop(stdscr)
+        finally:
+            self._shutdown_bpm_task()
+
+    def _event_loop(self, stdscr: curses._CursesWindow) -> None:
         while True:
             # Render all panels
             self._refresh_progress()
             self._poll_scan_task()
+            self._poll_bpm_task()
             self._poll_queue_task()
             self._poll_mpris_task()
             self._render_layout(stdscr)
@@ -660,7 +777,7 @@ class Player3Column:
             stdscr.addnstr(
                 height - 1,
                 col,
-                "[A] Add folder".ljust(width - 1)[: width - 1],
+                "[A] Add folder  [B] Analyze tempo".ljust(width - 1)[: width - 1],
                 width - 1,
                 curses.A_DIM,
             )

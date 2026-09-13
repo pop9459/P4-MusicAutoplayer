@@ -21,6 +21,8 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
@@ -163,3 +165,82 @@ def analyze_tracks(
     if on_checkpoint is not None and total:
         on_checkpoint()
     return analyzed, failed
+
+
+@dataclass
+class BpmTask:
+    """Background tempo detection, polled from the TUI's render loop.
+
+    Same shape as `library.ScanTask`, with the same rule: the thread never
+    touches curses, mpv, or the catalog. It only reads each track's path and
+    publishes finished results into a lock-guarded dict, which the UI thread
+    drains and applies. The live catalog is therefore only ever written from
+    one thread, even though playback and queue generation continue during a
+    run that takes tens of minutes.
+    """
+
+    thread: threading.Thread | None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    done: threading.Event = field(default_factory=threading.Event)
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    _progress: list[int] = field(default_factory=lambda: [0, 0])
+    _results: dict[str, float] = field(default_factory=dict)
+    _failed: list[int] = field(default_factory=lambda: [0])
+    error: list[BaseException] = field(default_factory=list)
+
+    def progress(self) -> tuple[int, int]:
+        with self.lock:
+            return self._progress[0], self._progress[1]
+
+    def failed_count(self) -> int:
+        with self.lock:
+            return self._failed[0]
+
+    def drain(self) -> dict[str, float]:
+        """Take everything detected since the last call.
+
+        Draining rather than accumulating means a long run applies its
+        results as it goes, so an interrupted session still keeps the tempi
+        it managed to detect.
+        """
+        with self.lock:
+            drained = self._results
+            self._results = {}
+            return drained
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+
+
+def start_bpm_task(tracks: Iterable[TrackRecord]) -> BpmTask:
+    """Analyze `tracks` on a background thread, reading them but never writing.
+
+    Checks for aubio up front so a missing dependency surfaces immediately
+    rather than as 2599 consecutive failures.
+    """
+    pending = list(tracks)
+    task = BpmTask(thread=None)
+    task._progress[1] = len(pending)
+
+    def _run() -> None:
+        try:
+            require_aubio()
+            for index, track in enumerate(pending, start=1):
+                if task.cancelled.is_set():
+                    break
+                bpm = detect_bpm(track.path)
+                with task.lock:
+                    task._progress[0] = index
+                    if bpm is None:
+                        task._failed[0] += 1
+                    else:
+                        task._results[track.id] = bpm
+        except BaseException as error:  # noqa: BLE001 - surfaced to the UI, never raised on this thread
+            task.error.append(error)
+        finally:
+            task.done.set()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    task.thread = thread
+    thread.start()
+    return task
