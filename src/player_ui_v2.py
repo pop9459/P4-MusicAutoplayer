@@ -44,6 +44,10 @@ SEARCH_BAR_ROWS = 1
 # zero/negative width.
 MIN_COLUMN_WIDTH = 12
 
+# The folders column shows short names (folder display names, "All
+# Tracks"), so it tolerates a lower floor than songs/queue's free text.
+MIN_FOLDERS_WIDTH = 8
+
 MIN_QUEUE_LENGTH = 10
 
 # Color pair IDs. Initialized lazily in _init_colors() (only once a real
@@ -756,14 +760,17 @@ class Player3Column:
     def _compute_column_widths(width: int) -> tuple[int, int, int]:
         """Split the terminal width into (folders, songs, queue) column
         widths. Spotify-like: the track list gets most of the space, the
-        folder and queue rails are narrow side columns -- folders ~1/6,
-        queue ~1/4, songs the remainder (~58%).
+        folder and queue rails are narrow side columns -- folders ~1/12,
+        queue ~1/4, songs the remainder (~67%). Folders is intentionally
+        half of the songs/queue-style 1/6 a sibling column would get: it
+        only ever shows short names, so it needs less room than free text.
 
-        Floored at MIN_COLUMN_WIDTH so a narrow terminal can't collapse a
-        column to zero or negative width (no such floor existed before
-        this -- the old 20/40/40 split had the same latent gap, it just
-        needed a narrower terminal to hit it)."""
-        col_width_folders = max(MIN_COLUMN_WIDTH, width // 6)
+        Floored (MIN_FOLDERS_WIDTH for folders, MIN_COLUMN_WIDTH for the
+        other two) so a narrow terminal can't collapse a column to zero or
+        negative width (no such floor existed before this -- the old
+        20/40/40 split had the same latent gap, it just needed a narrower
+        terminal to hit it)."""
+        col_width_folders = max(MIN_FOLDERS_WIDTH, width // 12)
         col_width_queue = max(MIN_COLUMN_WIDTH, width // 4)
         col_width_songs = max(1, width - col_width_folders - col_width_queue)
         return col_width_folders, col_width_songs, col_width_queue
