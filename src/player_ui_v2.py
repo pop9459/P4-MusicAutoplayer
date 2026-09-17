@@ -386,6 +386,8 @@ class Player3Column:
             self.active_column = 0
         elif key in (ord("\n"),):
             self._play_selected_song()
+        elif key in (ord("o"), ord("O")):
+            self.songs_panel.cycle_sort()
 
         return True
 
@@ -886,6 +888,8 @@ class Player3Column:
         row += 1
 
         count_text = f"{len(self.songs_panel.songs)} tracks"
+        if self.songs_panel.sort_mode != "default":
+            count_text += f"  [sort: {self.songs_panel.sort_mode}]"
         stdscr.addnstr(
             row, col, count_text.ljust(width - 1)[: width - 1], width - 1, curses.A_DIM
         )
@@ -896,7 +900,7 @@ class Player3Column:
         stdscr.addnstr(
             row,
             col,
-            "[R] Play Random".ljust(width - 1)[: width - 1],
+            "[R] Play Random  [O] Sort".ljust(width - 1)[: width - 1],
             width - 1,
             btn_attr,
         )

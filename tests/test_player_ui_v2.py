@@ -251,6 +251,15 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
         player.handle_songs_input(ord("n"))
         # Queue should advance
 
+    def test_handle_songs_input_o_cycles_sort(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.active_column = 1
+        self.assertEqual(player.songs_panel.sort_mode, "default")
+
+        player.handle_songs_input(ord("o"))
+
+        self.assertEqual(player.songs_panel.sort_mode, "title")
+
     def test_handle_songs_input_comma_goes_back(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
         player._play_selected_song()

@@ -183,6 +183,70 @@ class SongsPanelTests(unittest.TestCase):
         self.assertEqual(panel.filter_query, "")
         self.assertEqual([track.id for track in panel.songs], ["b1"])
 
+    def _sortable_tracks(self) -> list[TrackRecord]:
+        """Three tracks whose title/artist/album orderings all disagree
+        with each other and with declaration order, so each sort mode
+        produces a distinguishable, verifiable result."""
+        return [
+            TrackRecord(id="1", path="/m/1.mp3", title="Zebra Song", artist="Alpha Artist", album="Middle Album"),
+            TrackRecord(id="2", path="/m/2.mp3", title="Apple Song", artist="Zulu Artist", album="Alpha Album"),
+            TrackRecord(id="3", path="/m/3.mp3", title="Mango Song", artist="Mid Artist", album="Zulu Album"),
+        ]
+
+    def _sortable_panel(self) -> SongsPanel:
+        panel = SongsPanel()
+        tracks = self._sortable_tracks()
+        panel.all_songs = tracks
+        panel.songs = list(tracks)
+        panel.selected_index = 0
+        panel.selected_song = tracks[0]
+        return panel
+
+    def test_cycle_sort_orders_by_title(self) -> None:
+        panel = self._sortable_panel()
+        panel.cycle_sort()
+        self.assertEqual(panel.sort_mode, "title")
+        self.assertEqual([t.id for t in panel.songs], ["2", "3", "1"])
+
+    def test_cycle_sort_orders_by_artist(self) -> None:
+        panel = self._sortable_panel()
+        panel.cycle_sort()
+        panel.cycle_sort()
+        self.assertEqual(panel.sort_mode, "artist")
+        self.assertEqual([t.id for t in panel.songs], ["1", "3", "2"])
+
+    def test_cycle_sort_orders_by_album(self) -> None:
+        panel = self._sortable_panel()
+        panel.cycle_sort()
+        panel.cycle_sort()
+        panel.cycle_sort()
+        self.assertEqual(panel.sort_mode, "album")
+        self.assertEqual([t.id for t in panel.songs], ["2", "1", "3"])
+
+    def test_cycle_sort_wraps_back_to_default(self) -> None:
+        panel = self._sortable_panel()
+        for _ in range(4):
+            panel.cycle_sort()
+        self.assertEqual(panel.sort_mode, "default")
+        self.assertEqual([t.id for t in panel.songs], ["1", "2", "3"])
+
+    def test_cycle_sort_preserves_selected_track_identity_across_reorder(self) -> None:
+        panel = self._sortable_panel()
+        panel.select_song(0)  # track "1" ("Zebra Song")
+        panel.cycle_sort()  # sort by title -> "1" moves to the last slot
+        self.assertEqual(panel.selected_song.id, "1")
+        self.assertEqual(panel.selected_index, 2)
+
+    def test_filter_and_sort_compose(self) -> None:
+        panel = self._sortable_panel()
+        panel.filter_query = "Song"  # matches all three titles
+        panel._apply_filter_and_sort()
+        panel.cycle_sort()  # -> title
+        self.assertEqual([t.id for t in panel.songs], ["2", "3", "1"])
+        panel.apply_filter("Zebra")
+        self.assertEqual([t.id for t in panel.songs], ["1"])
+        self.assertEqual(panel.sort_mode, "title")
+
 
 class QueuePanelTests(unittest.TestCase):
     @classmethod
