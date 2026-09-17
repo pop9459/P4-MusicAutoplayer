@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import math
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.predictor import rank_candidates
 from src.track_analyzer import (
     FEATURE_WEIGHTS,
+    _GENRE_TREE,
+    Catalog,
     TrackRecord,
     _genre_similarity,
     _parse_bpm_from_tag,
@@ -158,6 +161,53 @@ class ReadTagMetadataTests(unittest.TestCase):
         with patch("src.track_analyzer.mutagen", None):
             result = _read_tag_metadata(__import__("pathlib").Path("/fake/track.mp3"))
         self.assertEqual(result, {})
+
+    def test_reads_duration_from_info_length(self) -> None:
+        # mutagen.File(path, easy=True) returns one object that answers
+        # both tags.get(...) (easy tags) and tags.info.length (stream
+        # info) -- a plain dict with an added `.info` attribute stands in
+        # for that here, same shape as the real EasyID3/EasyMP3 object.
+        fake_tags = {"genre": ["Eurodance"]}
+        fake_tags = type("FakeTags", (dict,), {})(fake_tags)
+        fake_tags.info = SimpleNamespace(length=192.792)
+        with patch("src.track_analyzer.mutagen") as mock_mutagen:
+            mock_mutagen.File.return_value = fake_tags
+            result = _read_tag_metadata(__import__("pathlib").Path("/fake/track.mp3"))
+        self.assertEqual(result["duration"], 192.792)
+
+    def test_missing_info_omits_duration(self) -> None:
+        with patch("src.track_analyzer.mutagen") as mock_mutagen:
+            mock_mutagen.File.return_value = {"genre": ["Eurodance"]}
+            result = _read_tag_metadata(__import__("pathlib").Path("/fake/track.mp3"))
+        self.assertNotIn("duration", result)
+
+    def test_zero_length_omits_duration(self) -> None:
+        fake_tags = type("FakeTags", (dict,), {})({})
+        fake_tags.info = SimpleNamespace(length=0.0)
+        with patch("src.track_analyzer.mutagen") as mock_mutagen:
+            mock_mutagen.File.return_value = fake_tags
+            result = _read_tag_metadata(__import__("pathlib").Path("/fake/track.mp3"))
+        self.assertNotIn("duration", result)
+
+
+class TrackRecordDurationTests(unittest.TestCase):
+    def test_from_dict_defaults_duration_to_none_when_missing(self) -> None:
+        """A pre-v3 catalog has no "duration" key at all -- it must still
+        load, with duration defaulting to None rather than raising."""
+        payload = {"id": "t", "path": "/t.mp3", "title": "T"}
+        track = TrackRecord.from_dict(payload)
+        self.assertIsNone(track.duration)
+
+    def test_from_dict_round_trips_duration(self) -> None:
+        payload = {"id": "t", "path": "/t.mp3", "title": "T", "duration": 192.792}
+        track = TrackRecord.from_dict(payload)
+        self.assertEqual(track.duration, 192.792)
+
+    def test_catalog_to_dict_round_trips_duration(self) -> None:
+        track = TrackRecord(id="t", path="/t.mp3", title="T", artist="A", duration=180.0)
+        catalog = build_catalog([track])
+        restored = Catalog.from_dict(catalog.to_dict())
+        self.assertEqual(restored.tracks[0].duration, 180.0)
 
 
 class SimilarityTermTests(unittest.TestCase):

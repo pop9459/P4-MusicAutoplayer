@@ -225,6 +225,7 @@ def migrate_settings_to_library(settings: Settings, settings_path: Path) -> Libr
                 year=track.year,
                 enabled=track.enabled,
                 folder_id=folder_id,
+                duration=track.duration,
             )
         )
 

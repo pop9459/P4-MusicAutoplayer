@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover - exercised only when dependency missing
     mutagen = None
 
 SUPPORTED_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".wav", ".ogg", ".aac"}
-CATALOG_VERSION = 2
+CATALOG_VERSION = 3
 _YEAR_PATTERN = re.compile(r"(\d{4})")
 
 # Relative influence of each metadata signal on recommendation similarity.
@@ -357,6 +357,14 @@ def _read_tag_metadata(path: Path) -> dict[str, Any]:
         if bpm is not None:
             result["bpm"] = bpm
 
+    # `.info` is the container's stream info (length, bitrate, ...), not an
+    # easy-tag -- it lives on the same File object easy=True already
+    # returned, no second non-easy read needed.
+    info = getattr(tags, "info", None)
+    duration = getattr(info, "length", None)
+    if duration is not None and duration > 0:
+        result["duration"] = float(duration)
+
     return result
 
 
@@ -372,12 +380,15 @@ class TrackRecord:
     year: int | None = None
     enabled: bool = True
     folder_id: str = ""
+    duration: float | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TrackRecord":
         # A pre-v2 catalog carries a precomputed "feature_vector" per track.
         # It is deliberately ignored and dropped on the next save: similarity
-        # is now computed per pair from the metadata itself.
+        # is now computed per pair from the metadata itself. A pre-v3
+        # catalog has no "duration" key at all -- it defaults to None here
+        # and gets backfilled on the next rescan, same as a missing bpm tag.
         return cls(
             id=str(payload["id"]),
             path=str(payload["path"]),
@@ -389,6 +400,7 @@ class TrackRecord:
             year=_coerce_int(payload.get("year")),
             enabled=bool(payload.get("enabled", True)),
             folder_id=str(payload.get("folder_id", "")),
+            duration=_coerce_float(payload.get("duration")),
         )
 
 
@@ -631,6 +643,7 @@ def _scan_one(path: Path, folder_id: str = "") -> TrackRecord:
         year=tag_metadata.get("year"),
         enabled=True,
         folder_id=folder_id,
+        duration=tag_metadata.get("duration"),
     )
 
 
@@ -710,6 +723,7 @@ def build_catalog(tracks: Iterable[TrackRecord]) -> Catalog:
                 year=track.year,
                 enabled=track.enabled,
                 folder_id=track.folder_id,
+                duration=track.duration,
             )
         )
 

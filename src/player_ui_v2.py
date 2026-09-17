@@ -20,7 +20,7 @@ from .library import (
 from .mpris_service import MprisService, start_mpris_service
 from .mpv_backend import MpvBackend, MpvUnavailableError
 from .player import PlayerEngine, QueueTask, filter_enabled_tracks, start_queue_task
-from .player_bar import PlayerBar
+from .player_bar import PlayerBar, _format_time
 from .queue_panel import QueuePanel
 from .settings import DEFAULT_SETTINGS_PATH, Settings, load_settings, save_settings
 from .settings_panel import FIELDS as SETTINGS_FIELDS
@@ -907,9 +907,21 @@ class Player3Column:
         )
         row += 1
 
+        # Column widths are fractions of the songs column's own `width`
+        # (not fixed character counts), so a wider/narrower songs column
+        # doesn't need retuning here.
+        index_width = 4  # "999."
+        duration_width = 6  # " 3:45"
+        artist_width = max(8, width // 4)
+        title_width = max(4, width - index_width - artist_width - duration_width - 2)
+
         for track, idx, is_selected in self.songs_panel.get_visible_songs(height - row):
             attr = self._cursor_attr(1) if is_selected else curses.A_NORMAL
-            line = f"{idx + 1}. {track.title}"[: width - 1]
+            index_part = f"{idx + 1:>3}."
+            title_part = track.title[:title_width].ljust(title_width)
+            artist_part = track.artist[: artist_width - 1].ljust(artist_width - 1)
+            duration_part = _format_time(track.duration) if track.duration else "--:--"
+            line = f"{index_part} {title_part} {artist_part} {duration_part:>5}"[: width - 1]
             stdscr.addnstr(row, col, line.ljust(width - 1), width - 1, attr)
             row += 1
 
