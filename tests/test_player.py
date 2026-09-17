@@ -192,6 +192,38 @@ class PlayerEngineTests(unittest.TestCase):
         self.assertIsNone(engine.advance_immediate())
         self.assertEqual(engine.current_track.id, "only")
 
+    def test_go_back_restores_previous_track(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3)
+        bumped_track = engine.advance()
+
+        previous_track = engine.go_back()
+
+        self.assertIsNotNone(previous_track)
+        self.assertEqual(previous_track.id, "start")
+        self.assertEqual(engine.current_track.id, "start")
+        self.assertEqual(engine.queue[0].id, bumped_track.id)
+        self.assertEqual([t.id for t in engine.history], ["start"])
+
+    def test_go_back_noop_with_no_history(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3)
+        queue_before = list(engine.queue)
+
+        self.assertIsNone(engine.go_back())
+        self.assertEqual(engine.current_track.id, "start")
+        self.assertEqual([t.id for t in engine.queue], [t.id for t in queue_before])
+        self.assertEqual([t.id for t in engine.history], ["start"])
+
+    def test_go_back_twice_walks_history_further_back(self) -> None:
+        engine = PlayerEngine(self.catalog, self.start_track, top_k=5, randomness=0.0, queue_length=3)
+        first_track = engine.advance()
+        second_track = engine.advance()
+
+        self.assertEqual(engine.go_back().id, first_track.id)
+        self.assertEqual(engine.go_back().id, "start")
+        self.assertEqual(engine.current_track.id, "start")
+        self.assertEqual(engine.queue[0].id, first_track.id)
+        self.assertEqual(engine.queue[1].id, second_track.id)
+
 
 def _max_consecutive_run(values: list[str]) -> int:
     longest = 0

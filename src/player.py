@@ -187,6 +187,25 @@ class PlayerEngine:
         self.queue_regenerated = self._top_up_queue()
         return self.queue_regenerated
 
+    def go_back(self) -> TrackRecord | None:
+        """Move to the previous track in history, pushing the current track
+        back onto the front of the queue.
+
+        `history`'s invariant is "last element is always the current
+        track" (see `advance_immediate`); this pops the current entry,
+        pops the actual previous track, and re-appends it to restore that
+        invariant. Returns the restored track, or None if there is no
+        previous track to go back to (history has one or zero entries).
+        """
+        if len(self.history) < 2:
+            return None
+        self.history.pop()
+        previous_track = self.history.pop()
+        self.queue.insert(0, self.current_track)
+        self.current_track = previous_track
+        self.history.append(self.current_track)
+        return self.current_track
+
     def advance(self) -> TrackRecord | None:
         """Move to the next queued track, topping the queue back up to
         `queue_length` afterward.

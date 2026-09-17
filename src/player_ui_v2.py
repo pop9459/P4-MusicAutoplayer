@@ -208,6 +208,8 @@ class Player3Column:
                     self.player_bar.set_paused(self.backend.toggle_pause())
             elif action == "next":
                 self._advance_track()
+            elif action == "previous":
+                self._go_back_track()
             elif action == "stop":
                 if self.engine:
                     self.backend.stop()
@@ -289,6 +291,26 @@ class Player3Column:
         self._begin_queue_task(self.engine.top_up_queue_steps)
         return True
 
+    def _go_back_track(self) -> bool:
+        """Move to the previous track in history. Unlike `_advance_track`,
+        the queue doesn't shrink (the current track is bumped back onto its
+        front), so no background top-up task is needed -- but the queue
+        panel must be refreshed here explicitly, since it's otherwise only
+        refreshed by `_poll_queue_task` when a top-up task is running."""
+        if not self.engine:
+            return False
+
+        previous_track = self.engine.go_back()
+        if previous_track is None:
+            self.player_bar.set_status("No previous track.")
+            return True
+
+        self.player_bar.update_track(previous_track)
+        self.player_bar.set_status(f"Playing: {previous_track.title}")
+        self.backend.load_file(previous_track.path)
+        self.queue_panel.update_queue(self.engine.queue_snapshot(), self.engine.current_track)
+        return True
+
     def _handle_playback_keys(self, key: int) -> bool | None:
         """Playback controls usable from any column (folders or songs) --
         so play/pause etc. aren't only reachable once the songs column has
@@ -303,6 +325,9 @@ class Player3Column:
             return True
         elif key in (ord("n"), ord("N")):
             self._advance_track()
+            return True
+        elif key == ord(","):
+            self._go_back_track()
             return True
         elif key in (ord("r"), ord("R")):
             self._play_random_song()
@@ -878,7 +903,7 @@ class Player3Column:
         """Render bottom player bar: state/track/controls, then a progress bar."""
         state = self.player_bar.get_state_display()
         track_display = self.player_bar.get_track_display()
-        controls = "[Space]Play/Pause  [N]ext  [R]andom  [Q]uit"
+        controls = "[Space]Play/Pause [,]Back [N]ext [R]andom [Q]uit"
 
         bar_attr = (
             curses.color_pair(COLOR_PLAYER_BAR)

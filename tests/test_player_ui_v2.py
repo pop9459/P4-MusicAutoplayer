@@ -186,6 +186,28 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
         player.handle_songs_input(ord("n"))
         # Queue should advance
 
+    def test_handle_songs_input_comma_goes_back(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
+        player.active_column = 1
+        original_track = player.engine.current_track
+        player.handle_songs_input(ord("n"))
+        self.assertNotEqual(player.engine.current_track.id, original_track.id)
+
+        player.handle_songs_input(ord(","))
+
+        self.assertEqual(player.engine.current_track.id, original_track.id)
+        self.backend.load_file.assert_called_with(original_track.path)
+
+    def test_handle_songs_input_comma_with_no_history_reports_status(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
+        player.active_column = 1
+
+        player.handle_songs_input(ord(","))
+
+        self.assertEqual(player.player_bar.status_message, "No previous track.")
+
     def test_queue_updates_on_playback(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
         player._play_selected_song()
