@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.folder_panel import FolderPanel
-from src.library import Library, LibraryFolder
+from src.library import ALL_TRACKS_FOLDER_ID, Library, LibraryFolder
 from src.mpv_backend import MpvBackend
 from src.player import PlayerEngine
 from src.player_bar import PlayerBar
@@ -61,6 +61,11 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
         player = Player3Column(self.library, self.settings, self.backend)
         # Should auto-load songs from first folder
         self.assertTrue(len(player.songs_panel.songs) > 0)
+
+    def test_startup_focuses_songs_column_with_all_tracks_selected(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        self.assertEqual(player.active_column, 1)
+        self.assertEqual(player.folder_panel.selected_entry.id, ALL_TRACKS_FOLDER_ID)
 
     def test_engine_is_none_until_song_selected(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
