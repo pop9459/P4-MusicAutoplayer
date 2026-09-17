@@ -121,6 +121,45 @@ class SongsPanelTests(unittest.TestCase):
         panel.previous_song()
         self.assertEqual(panel.selected_index, 0)
 
+    def _long_panel(self, count: int, visible_lines: int = 10) -> SongsPanel:
+        panel = SongsPanel()
+        tracks = [
+            TrackRecord(id=str(i), path=f"/m/{i}.mp3", title=f"Track {i}", artist="A")
+            for i in range(count)
+        ]
+        panel.all_songs = tracks
+        panel.songs = list(tracks)
+        panel.selected_index = 0
+        panel.selected_song = tracks[0]
+        panel.visible_lines = visible_lines
+        return panel
+
+    def test_scroll_stays_pinned_to_top_near_start_of_list(self) -> None:
+        panel = self._long_panel(count=30, visible_lines=10)
+        for _ in range(2):  # index 0 -> 2, well within the first half-page
+            panel.next_song()
+        self.assertEqual(panel.selected_index, 2)
+        self.assertEqual(panel.scroll_offset, 0)
+
+    def test_scroll_centers_cursor_away_from_either_edge(self) -> None:
+        panel = self._long_panel(count=30, visible_lines=10)
+        for _ in range(15):
+            panel.next_song()
+        self.assertEqual(panel.selected_index, 15)
+        # half = visible_lines // 2 = 5, so the cursor sits 5 rows into the
+        # visible window: scroll_offset = 15 - 5 = 10.
+        self.assertEqual(panel.scroll_offset, 10)
+        cursor_row_in_viewport = panel.selected_index - panel.scroll_offset
+        self.assertEqual(cursor_row_in_viewport, 5)
+
+    def test_scroll_pins_to_bottom_near_end_of_list(self) -> None:
+        panel = self._long_panel(count=30, visible_lines=10)
+        for _ in range(29):  # walk to the last track
+            panel.next_song()
+        self.assertEqual(panel.selected_index, 29)
+        # Can't scroll past the end: offset floors at len - visible_lines.
+        self.assertEqual(panel.scroll_offset, 20)
+
     def test_get_visible_songs_returns_tuples(self) -> None:
         panel = SongsPanel()
         panel.load_songs_from_library(self.library, self._all_tracks_entry())

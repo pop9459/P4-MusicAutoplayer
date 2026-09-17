@@ -940,6 +940,11 @@ class Player3Column:
         artist_width = max(8, width // 4)
         title_width = max(4, width - index_width - artist_width - duration_width - 2)
 
+        # Kept in sync each render tick so SongsPanel._update_scroll's
+        # centering (triggered by next_song/previous_song, which run
+        # outside of rendering) matches the real viewport, not a guess.
+        self.songs_panel.visible_lines = max(1, height - row)
+
         for track, idx, is_selected in self.songs_panel.get_visible_songs(height - row):
             attr = self._cursor_attr(1) if is_selected else curses.A_NORMAL
             index_part = f"{idx + 1:>3}."

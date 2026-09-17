@@ -643,6 +643,18 @@ class SongsRenderTests(unittest.TestCase):
         self.assertEqual(row_no_scroll, row_scrolled)
         self.assertEqual(row_no_scroll, 3)  # below the name/path/count header rows
 
+    def test_render_songs_syncs_visible_lines_for_scroll_centering(self) -> None:
+        """SongsPanel._update_scroll's centering needs the real viewport
+        height, not a guess -- _render_songs must publish it each tick."""
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.songs_panel.songs = list(self.catalog.tracks) * 3
+
+        stdscr = FakeStdscr()
+        player._render_songs(stdscr, row=0, col=0, width=40, height=14)
+
+        # height=14 minus the 4 header/button rows above the list = 10.
+        self.assertEqual(player.songs_panel.visible_lines, 10)
+
     def test_song_row_shows_title_artist_and_duration(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
         track = dataclasses.replace(
