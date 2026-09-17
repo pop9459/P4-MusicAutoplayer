@@ -131,6 +131,58 @@ class SongsPanelTests(unittest.TestCase):
             self.assertIsInstance(idx, int)
             self.assertIsInstance(is_selected, bool)
 
+    def test_apply_filter_matches_title_case_insensitive(self) -> None:
+        panel = SongsPanel()
+        panel.load_songs_from_library(self.library, self._all_tracks_entry())
+        panel.apply_filter("a1")
+        self.assertEqual([track.id for track in panel.songs], ["a1"])
+
+    def test_apply_filter_matches_artist_case_insensitive(self) -> None:
+        panel = SongsPanel()
+        panel.load_songs_from_library(self.library, self._all_tracks_entry())
+        panel.apply_filter("ARTIST A")
+        self.assertEqual([track.id for track in panel.songs], ["a1", "a2"])
+
+    def test_apply_filter_empty_query_clears_filter(self) -> None:
+        panel = SongsPanel()
+        panel.load_songs_from_library(self.library, self._all_tracks_entry())
+        panel.apply_filter("a1")
+        panel.apply_filter("")
+        self.assertEqual([track.id for track in panel.songs], ["a1", "a2", "b1"])
+        self.assertEqual(panel.filter_query, "")
+
+    def test_apply_filter_resets_selection_and_scroll(self) -> None:
+        panel = SongsPanel()
+        panel.load_songs_from_library(self.library, self._all_tracks_entry())
+        panel.next_song()
+        panel.scroll_offset = 2
+        panel.apply_filter("b1")
+        self.assertEqual(panel.selected_index, 0)
+        self.assertEqual(panel.selected_song.id, "b1")
+        self.assertEqual(panel.scroll_offset, 0)
+
+    def test_apply_filter_does_not_mutate_all_songs(self) -> None:
+        panel = SongsPanel()
+        panel.load_songs_from_library(self.library, self._all_tracks_entry())
+        all_before = list(panel.all_songs)
+        panel.apply_filter("a1")
+        self.assertEqual(panel.all_songs, all_before)
+
+    def test_apply_filter_no_match_yields_empty_list(self) -> None:
+        panel = SongsPanel()
+        panel.load_songs_from_library(self.library, self._all_tracks_entry())
+        panel.apply_filter("nonexistent")
+        self.assertEqual(panel.songs, [])
+        self.assertIsNone(panel.selected_song)
+
+    def test_load_songs_from_library_resets_filter(self) -> None:
+        panel = SongsPanel()
+        panel.load_songs_from_library(self.library, self._all_tracks_entry())
+        panel.apply_filter("a1")
+        panel.load_songs_from_library(self.library, self._folder_b_entry())
+        self.assertEqual(panel.filter_query, "")
+        self.assertEqual([track.id for track in panel.songs], ["b1"])
+
 
 class QueuePanelTests(unittest.TestCase):
     @classmethod

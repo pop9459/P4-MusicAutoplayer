@@ -81,6 +81,7 @@ class Player3Column:
 
         self._scan_task: ScanTask | None = None
         self._adding_folder = False
+        self._searching_songs = False
 
         self._bpm_task: BpmTask | None = None
         self._bpm_applied_since_save = 0
@@ -380,6 +381,8 @@ class Player3Column:
             self.active_column = 0
         elif key in (ord("\n"),):
             self._play_selected_song()
+        elif key == ord("/"):
+            self._searching_songs = True
 
         return True
 
@@ -665,6 +668,9 @@ class Player3Column:
                 self._prompt_add_folder(stdscr)
             elif self.settings_panel.editing_text:
                 self._edit_text_field(stdscr)
+            elif self._searching_songs:
+                self._searching_songs = False
+                self._prompt_song_search(stdscr)
 
     def _prompt_add_folder(self, stdscr: curses._CursesWindow) -> None:
         """Synchronously prompt for a folder path to add (blocking
@@ -688,6 +694,30 @@ class Player3Column:
             stdscr.timeout(POLL_INTERVAL_MS)
 
         self._begin_add_folder_scan(value)
+
+    def _prompt_song_search(self, stdscr: curses._CursesWindow) -> None:
+        """Synchronously prompt for a song search query (same blocking
+        curses.echo()/getstr() pattern as _prompt_add_folder). An empty
+        query clears any active filter."""
+        height, width = stdscr.getmaxyx()
+        prompt = "Search: "
+        stdscr.addnstr(
+            height - 1, 0, prompt.ljust(width - 1), width - 1, curses.A_REVERSE
+        )
+        stdscr.refresh()
+
+        curses.echo()
+        curses.curs_set(1)
+        stdscr.timeout(-1)
+        try:
+            raw = stdscr.getstr(height - 1, len(prompt), width - len(prompt) - 1)
+            value = raw.decode("utf-8", errors="replace")
+        finally:
+            curses.noecho()
+            curses.curs_set(0)
+            stdscr.timeout(POLL_INTERVAL_MS)
+
+        self.songs_panel.apply_filter(value)
 
     def _edit_text_field(self, stdscr: curses._CursesWindow) -> None:
         """Synchronously prompt for a new value for the field currently being
@@ -829,6 +859,8 @@ class Player3Column:
         row += 1
 
         count_text = f"{len(self.songs_panel.songs)} tracks"
+        if self.songs_panel.filter_query:
+            count_text += f"  [/ filtered: '{self.songs_panel.filter_query}']"
         stdscr.addnstr(
             row, col, count_text.ljust(width - 1)[: width - 1], width - 1, curses.A_DIM
         )
@@ -839,7 +871,7 @@ class Player3Column:
         stdscr.addnstr(
             row,
             col,
-            "[R] Play Random".ljust(width - 1)[: width - 1],
+            "[R] Play Random  [/] Search".ljust(width - 1)[: width - 1],
             width - 1,
             btn_attr,
         )

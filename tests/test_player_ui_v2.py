@@ -178,6 +178,12 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
         player.handle_songs_input(ord("r"))
         self.assertIsNotNone(player.player_bar.current_track)
 
+    def test_handle_songs_input_slash_sets_searching_flag(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.active_column = 1
+        player.handle_songs_input(ord("/"))
+        self.assertTrue(player._searching_songs)
+
     def test_handle_songs_input_next_track(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
         player._play_selected_song()
