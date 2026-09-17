@@ -540,11 +540,56 @@ class ColumnDividerOverlapTests(unittest.TestCase):
         # false positive -- e.g. the queue column's own "ZEBRA - Track"
         # text landing on the same physical row as the songs column,
         # regardless of what the songs column itself drew. Slice out just
-        # the songs column's own character range (width=80: folders is 16
-        # wide, songs starts at col 17) to confirm "ZEBRA" genuinely comes
-        # from the songs column's artist text, not queue bleed-through.
-        songs_column_only = songs_row[17:48]
+        # the songs column's own character range (computed the same way
+        # _render_layout does, rather than hardcoded, so this keeps
+        # meaning what it says as the column split changes) to confirm
+        # "ZEBRA" genuinely comes from the songs column's artist text, not
+        # queue bleed-through.
+        col_width_folders, col_width_songs, _ = player._compute_column_widths(80)
+        songs_start = col_width_folders + 1
+        songs_end = col_width_folders + col_width_songs
+        songs_column_only = songs_row[songs_start:songs_end]
         self.assertIn("ZEBRA", songs_column_only)
+
+
+class ColumnWidthTests(unittest.TestCase):
+    """Issue #24: Spotify-like layout -- the songs column gets most of the
+    width, folders/queue are narrow side rails, and no column collapses
+    on a narrow terminal."""
+
+    def setUp(self) -> None:
+        self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.library = _library_from_catalog(self.catalog)
+        self.settings = load_settings()
+        self.backend = MagicMock(spec=MpvBackend)
+
+    def test_songs_column_is_wider_than_folders_and_queue(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        folders, songs, queue = player._compute_column_widths(100)
+        self.assertGreater(songs, folders)
+        self.assertGreater(songs, queue)
+        self.assertGreater(songs, folders + queue)
+
+    def test_widths_sum_to_terminal_width(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        folders, songs, queue = player._compute_column_widths(100)
+        self.assertEqual(folders + songs + queue, 100)
+
+    def test_narrow_terminal_does_not_collapse_a_column(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        folders, songs, queue = player._compute_column_widths(20)
+        self.assertGreaterEqual(folders, 1)
+        self.assertGreaterEqual(songs, 1)
+        self.assertGreaterEqual(queue, 1)
+
+    def test_narrow_terminal_layout_does_not_raise(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
+        player._colors_ready = True
+        stdscr = FakeStdscr(height=24, width=20)
+
+        with patch("curses.ACS_VLINE", ord("|"), create=True):
+            player._render_layout(stdscr)  # must not raise
 
 
 class QueueRenderTests(unittest.TestCase):
