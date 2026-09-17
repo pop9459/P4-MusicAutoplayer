@@ -18,7 +18,10 @@ crash playback -- it should just mean no image is shown.
 from __future__ import annotations
 
 import base64
+import fcntl
 import io
+import struct
+import termios
 from pathlib import Path
 from typing import Mapping
 
@@ -185,3 +188,45 @@ def build_cursor_position(row: int, col: int) -> bytes:
     moment the transmit command is written, which is why this needs to
     move the actual terminal cursor, not curses' internal notion of it."""
     return f"\x1b[{row + 1};{col + 1}H".encode("ascii")
+
+
+# Fallback cell aspect ratio (width_px / height_px) when the real terminal
+# cell size can't be queried. Terminal cells are usually about twice as
+# tall as wide for a monospace font -- close enough to size a square box
+# reasonably when the real dimensions aren't available (e.g. not a real
+# tty, or a terminal that doesn't fill in TIOCGWINSZ's pixel fields).
+_FALLBACK_CELL_WIDTH_PX = 1.0
+_FALLBACK_CELL_HEIGHT_PX = 2.0
+
+
+def terminal_cell_size_px(fd: int) -> tuple[float, float] | None:
+    """Real terminal cell size in pixels (width, height), via
+    TIOCGWINSZ's xpixel/ypixel fields -- Kitty (and most modern terminal
+    emulators) fill these in accurately, unlike older terminals. Returns
+    None if unavailable (not a real tty, or a terminal that reports 0 for
+    the pixel fields), so callers can fall back to an assumed ratio."""
+    try:
+        packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
+        rows, cols, xpixel, ypixel = struct.unpack("HHHH", packed)
+    except OSError:
+        return None
+    if rows <= 0 or cols <= 0 or xpixel <= 0 or ypixel <= 0:
+        return None
+    return xpixel / cols, ypixel / rows
+
+
+def compute_square_cell_box(
+    max_cols: int, max_rows: int, cell_width_px: float, cell_height_px: float
+) -> tuple[int, int]:
+    """The largest (cols, rows) box, in terminal cells, that (a) fits
+    within max_cols x max_rows and (b) is square in actual on-screen
+    pixels once scaled by the given cell size -- since Kitty stretches a
+    transmitted image to exactly fill whatever cols x rows box it's given
+    regardless of the image's own aspect ratio, a non-square box is what
+    makes (near-universally square) album art look stretched."""
+    if max_cols <= 0 or max_rows <= 0 or cell_width_px <= 0 or cell_height_px <= 0:
+        return max(1, max_cols), max(1, max_rows)
+    side_px = min(max_cols * cell_width_px, max_rows * cell_height_px)
+    cols = max(1, int(side_px / cell_width_px))
+    rows = max(1, int(side_px / cell_height_px))
+    return cols, rows

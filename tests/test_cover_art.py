@@ -19,9 +19,11 @@ from src.cover_art import (
     build_cursor_position,
     build_kitty_delete,
     build_kitty_transmit_chunks,
+    compute_square_cell_box,
     extract_cover_art,
     kitty_graphics_supported,
     normalize_to_png,
+    terminal_cell_size_px,
 )
 
 
@@ -254,6 +256,65 @@ class BuildCursorPositionTests(unittest.TestCase):
 
     def test_nonzero_row_col(self) -> None:
         self.assertEqual(build_cursor_position(5, 10), b"\x1b[6;11H")
+
+
+class TerminalCellSizePxTests(unittest.TestCase):
+    def _fake_winsize(self, rows: int, cols: int, xpixel: int, ypixel: int) -> bytes:
+        import struct
+
+        return struct.pack("HHHH", rows, cols, xpixel, ypixel)
+
+    def test_returns_pixel_size_per_cell(self) -> None:
+        with patch("src.cover_art.fcntl.ioctl", return_value=self._fake_winsize(24, 80, 800, 480)):
+            result = terminal_cell_size_px(1)
+        self.assertEqual(result, (10.0, 20.0))
+
+    def test_ioctl_error_returns_none(self) -> None:
+        with patch("src.cover_art.fcntl.ioctl", side_effect=OSError("not a tty")):
+            self.assertIsNone(terminal_cell_size_px(1))
+
+    def test_zero_pixel_fields_returns_none(self) -> None:
+        """Some terminals report a valid cell grid but leave the pixel
+        fields at 0 -- must not divide by zero, must signal "unknown"."""
+        with patch("src.cover_art.fcntl.ioctl", return_value=self._fake_winsize(24, 80, 0, 0)):
+            self.assertIsNone(terminal_cell_size_px(1))
+
+    def test_zero_rows_or_cols_returns_none(self) -> None:
+        with patch("src.cover_art.fcntl.ioctl", return_value=self._fake_winsize(0, 0, 800, 480)):
+            self.assertIsNone(terminal_cell_size_px(1))
+
+
+class ComputeSquareCellBoxTests(unittest.TestCase):
+    def test_width_constrained_box_shrinks_to_square(self) -> None:
+        # Cell is 10x20px (2:1 height:width, a typical monospace ratio).
+        # A wide box (40 cols) with only 8 rows available is height-
+        # constrained: 8 rows * 20px = 160px tall, so the square side is
+        # 160px, i.e. 16 cols wide -- not the full 40.
+        cols, rows = compute_square_cell_box(40, 8, 10.0, 20.0)
+        self.assertEqual(rows, 8)
+        self.assertEqual(cols, 16)
+
+    def test_height_constrained_box_shrinks_to_square(self) -> None:
+        # Narrow box (5 cols) with lots of rows available is width-
+        # constrained: 5 cols * 10px = 50px wide, so the square side is
+        # 50px, i.e. 2.5 -> 2 rows tall.
+        cols, rows = compute_square_cell_box(5, 20, 10.0, 20.0)
+        self.assertEqual(cols, 5)
+        self.assertEqual(rows, 2)
+
+    def test_result_is_actually_square_in_pixels(self) -> None:
+        cols, rows = compute_square_cell_box(30, 10, 9.0, 18.0)
+        width_px = cols * 9.0
+        height_px = rows * 18.0
+        # Within one cell's worth of rounding error in each dimension.
+        self.assertLess(abs(width_px - height_px), max(9.0, 18.0))
+
+    def test_zero_dimensions_fall_back_to_bounds(self) -> None:
+        self.assertEqual(compute_square_cell_box(0, 10, 10.0, 20.0), (1, 10))
+        self.assertEqual(compute_square_cell_box(10, 0, 10.0, 20.0), (10, 1))
+
+    def test_zero_cell_size_falls_back_to_bounds(self) -> None:
+        self.assertEqual(compute_square_cell_box(10, 8, 0.0, 20.0), (10, 8))
 
 
 if __name__ == "__main__":

@@ -10,12 +10,16 @@ from pathlib import Path
 
 from .bpm_analyzer import BpmTask, start_bpm_task, tracks_needing_bpm
 from .cover_art import (
+    _FALLBACK_CELL_HEIGHT_PX,
+    _FALLBACK_CELL_WIDTH_PX,
     build_cursor_position,
     build_kitty_delete,
     build_kitty_transmit_chunks,
+    compute_square_cell_box,
     extract_cover_art,
     kitty_graphics_supported,
     normalize_to_png,
+    terminal_cell_size_px,
 )
 from .folder_panel import FolderPanel
 from .library import (
@@ -934,7 +938,16 @@ class Player3Column:
         notion of the Kitty graphics protocol and would corrupt or strip
         the escape sequence. Always deletes the previous image first (a
         no-op on the terminal side if none was shown), then transmits a
-        new one only if `track` has embedded art."""
+        new one only if `track` has embedded art.
+
+        `cols`/`rows` is the maximum available box; Kitty stretches the
+        image to exactly fill whatever box it's given regardless of the
+        source image's own aspect ratio, so a plain "fill the whole
+        column" box left album art (virtually always square) visibly
+        stretched. Query the terminal's real cell pixel size (falling
+        back to an assumed ~2:1 height:width ratio if unavailable) and
+        pick the largest square that fits, with a 1-column margin so it
+        doesn't crowd the queue column's edge."""
         sys.stdout.buffer.write(build_kitty_delete(COVER_ART_IMAGE_ID))
 
         if track is not None:
@@ -942,9 +955,17 @@ class Player3Column:
             if art is not None:
                 png_bytes = normalize_to_png(art[0])
                 if png_bytes is not None:
+                    cell_size = terminal_cell_size_px(sys.stdout.fileno())
+                    cell_width_px, cell_height_px = cell_size or (
+                        _FALLBACK_CELL_WIDTH_PX,
+                        _FALLBACK_CELL_HEIGHT_PX,
+                    )
+                    square_cols, square_rows = compute_square_cell_box(
+                        max(1, cols - 1), max(1, rows), cell_width_px, cell_height_px
+                    )
                     sys.stdout.buffer.write(build_cursor_position(row, col))
                     for chunk in build_kitty_transmit_chunks(
-                        png_bytes, COVER_ART_IMAGE_ID, max(1, cols), max(1, rows)
+                        png_bytes, COVER_ART_IMAGE_ID, square_cols, square_rows
                     ):
                         sys.stdout.buffer.write(chunk)
 
