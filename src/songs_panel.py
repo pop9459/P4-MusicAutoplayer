@@ -29,6 +29,10 @@ class SongsPanel:
     selected_song: TrackRecord | None = None
     scroll_offset: int = 0
     status_message: str = ""
+    # Kept in sync with the real rendered viewport height each render tick
+    # (see Player3Column._render_songs), so _update_scroll's centering
+    # matches the terminal's actual size rather than a guess.
+    visible_lines: int = 10
 
     def load_songs_from_library(self, library: Library, folder_entry: FolderEntry) -> None:
         """Load enabled songs for the selected folder entry (or every
@@ -132,12 +136,19 @@ class SongsPanel:
             self._update_scroll()
 
     def _update_scroll(self) -> None:
-        """Adjust scroll offset to keep selected song visible."""
-        visible_lines = 10  # Approximate, adjust based on actual UI height
-        if self.selected_index < self.scroll_offset:
-            self.scroll_offset = self.selected_index
-        elif self.selected_index >= self.scroll_offset + visible_lines:
-            self.scroll_offset = self.selected_index - visible_lines + 1
+        """Keep the selected row centered in the visible viewport
+        (scrolloff-style), rather than letting the cursor ride the top/
+        bottom edge before scrolling kicks in. Clamped at both ends: near
+        the top of the list scroll_offset floors at 0 (can't scroll past
+        the start), near the bottom it floors at the last full page (can't
+        scroll past the end) -- true centering only happens away from
+        either edge, same as vim's `scrolloff=999`."""
+        if not self.songs:
+            self.scroll_offset = 0
+            return
+        half = self.visible_lines // 2
+        max_offset = max(0, len(self.songs) - self.visible_lines)
+        self.scroll_offset = max(0, min(self.selected_index - half, max_offset))
 
     def get_visible_songs(self, max_lines: int = 10) -> list[tuple[TrackRecord, int, bool]]:
         """Get visible songs for rendering. Return (track, index, is_selected)."""
