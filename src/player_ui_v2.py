@@ -31,11 +31,13 @@ from .track_analyzer import Catalog, TrackRecord
 POLL_INTERVAL_MS = 200
 
 # Rows the terminal height loses before it becomes the queue's visible-row
-# budget: _render_layout's content_height = height - 4 (player bar), then
-# _render_queue reserves 3 rows for its header, "Now Playing" line, and passes
-# `content_height - 3` to QueuePanel.get_visible_queue -- so the queue column
-# can show (height - 4) - 3 = height - 7 rows before needing to scroll.
-QUEUE_COLUMN_CHROME_ROWS = 7
+# budget: _render_layout reserves 1 row for the top search bar and 4 for the
+# player bar, then _render_queue reserves 3 more rows for its own header and
+# "Now Playing" line -- so the queue column can show
+# height - 1 - 4 - 3 = height - 8 rows before needing to scroll.
+QUEUE_COLUMN_CHROME_ROWS = 8
+
+SEARCH_BAR_ROWS = 1
 
 MIN_QUEUE_LENGTH = 10
 
@@ -81,6 +83,7 @@ class Player3Column:
 
         self._scan_task: ScanTask | None = None
         self._adding_folder = False
+        self._search_mode = False
 
         self._bpm_task: BpmTask | None = None
         self._bpm_applied_since_save = 0
@@ -334,6 +337,9 @@ class Player3Column:
             return True
         elif key in (ord("s"), ord("S")):
             self._enter_settings_mode()
+            return True
+        elif key == ord("/"):
+            self._search_mode = True
             return True
         return None
 
@@ -594,14 +600,38 @@ class Player3Column:
             )
 
     def handle_input(self, key: int) -> bool:
-        """Dispatch key to active column, or to the settings screen if open.
-        Return False to quit."""
+        """Dispatch key to the search box if it's open, to the settings
+        screen if open, or to the active column. Return False to quit."""
+        if self._search_mode:
+            return self._handle_search_input(key)
         if self.mode == "settings":
             return self.handle_settings_input(key)
         if self.active_column == 0:
             return self.handle_folder_input(key)
         else:
             return self.handle_songs_input(key)
+
+    def _handle_search_input(self, key: int) -> bool:
+        """Live, Spotify-style search: every keystroke re-filters the song
+        list immediately (via SongsPanel.apply_filter), rather than
+        blocking on a curses.echo()/getstr() prompt like the add-folder
+        flow. The search box owns all input while open, so quit/navigation
+        keys are swallowed rather than acted on -- typing "q" in a query
+        must not exit the player."""
+        if key == 27:  # Esc: discard the query, clear the filter, close the box.
+            self._search_mode = False
+            self.songs_panel.apply_filter("")
+            return True
+        if key in (curses.KEY_ENTER, 10, 13):  # Enter: keep the filter, close the box.
+            self._search_mode = False
+            return True
+        if key in (curses.KEY_BACKSPACE, 127, 8):
+            self.songs_panel.apply_filter(self.songs_panel.filter_query[:-1])
+            return True
+        if 32 <= key <= 126:  # printable ASCII
+            self.songs_panel.apply_filter(self.songs_panel.filter_query + chr(key))
+            return True
+        return True
 
     def handle_settings_input(self, key: int) -> bool:
         """Handle input while the settings screen is open. Return False to quit."""
@@ -733,29 +763,34 @@ class Player3Column:
         col_width_songs = (width * 2) // 5
         col_width_queue = width - col_width_folders - col_width_songs
 
-        # Player bar takes bottom 3 lines: state/track, progress bar, status
-        content_height = height - 4
+        # Search bar takes the top line; player bar takes the bottom 4.
+        content_top = SEARCH_BAR_ROWS
+        content_bottom = height - 4
+
+        self._render_search_bar(stdscr, 0, width)
 
         # Render folders
-        self._render_folders(stdscr, 0, 0, col_width_folders, content_height)
+        self._render_folders(
+            stdscr, content_top, 0, col_width_folders, content_bottom
+        )
 
         # Render songs. Content starts one column right of the divider so
         # the divider doesn't overwrite the first character of each row.
         self._render_songs(
-            stdscr, 0, col_width_folders + 1, col_width_songs - 1, content_height
+            stdscr, content_top, col_width_folders + 1, col_width_songs - 1, content_bottom
         )
 
         # Render queue, same one-column offset for the same reason.
         self._render_queue(
             stdscr,
-            0,
+            content_top,
             col_width_folders + col_width_songs + 1,
             col_width_queue - 1,
-            content_height,
+            content_bottom,
         )
 
         # Dividing lines
-        for y in range(content_height):
+        for y in range(content_top, content_bottom):
             stdscr.addch(y, col_width_folders, curses.ACS_VLINE)
             stdscr.addch(y, col_width_folders + col_width_songs, curses.ACS_VLINE)
 
@@ -763,6 +798,28 @@ class Player3Column:
         self._render_player_bar(stdscr, height - 3, width)
 
         stdscr.refresh()
+
+    def _render_search_bar(self, stdscr: curses._CursesWindow, row: int, width: int) -> None:
+        """Persistent top-of-screen search bar (Spotify-style): open with
+        "/" from any column, live-filters the song list on every keystroke
+        via _handle_search_input, closes with Enter (keeping the filter) or
+        Esc (clearing it)."""
+        if self._search_mode:
+            text = f" Search: {self.songs_panel.filter_query}_"
+            attr = curses.A_REVERSE
+        elif self.songs_panel.filter_query:
+            match_count = len(self.songs_panel.songs)
+            text = (
+                f" Search: {self.songs_panel.filter_query}"
+                f"  ({match_count} match{'es' if match_count != 1 else ''})"
+                "  [/] edit"
+            )
+            attr = curses.A_DIM
+        else:
+            text = " [/] Search tracks..."
+            attr = curses.A_DIM
+
+        stdscr.addnstr(row, 0, text.ljust(width - 1)[: width - 1], width - 1, attr)
 
     def _render_folders(
         self, stdscr: curses._CursesWindow, row: int, col: int, width: int, height: int
@@ -885,7 +942,7 @@ class Player3Column:
         )
         row += 1
 
-        for track, _ in self.queue_panel.get_visible_queue(height - 3):
+        for track, _ in self.queue_panel.get_visible_queue(height - row):
             line = f"{track.artist} - {track.title}"[: width - 1]
             stdscr.addnstr(row, col, line.ljust(width - 1), width - 1, curses.A_NORMAL)
             row += 1

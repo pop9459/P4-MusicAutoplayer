@@ -178,6 +178,71 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
         player.handle_songs_input(ord("r"))
         self.assertIsNotNone(player.player_bar.current_track)
 
+    def test_handle_songs_input_slash_opens_search_mode(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.active_column = 1
+        player.handle_songs_input(ord("/"))
+        self.assertTrue(player._search_mode)
+
+    def test_handle_folder_input_slash_opens_search_mode(self) -> None:
+        """Search is reachable from either column -- it's a top-level bar,
+        not a songs-column-specific control."""
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.active_column = 0
+        player.handle_folder_input(ord("/"))
+        self.assertTrue(player._search_mode)
+
+    def test_search_typing_filters_live_on_each_keystroke(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.handle_input(ord("/"))
+
+        for char in "mood":
+            player.handle_input(ord(char))
+
+        self.assertEqual(player.songs_panel.filter_query, "mood")
+        self.assertTrue(player._search_mode)
+        self.assertTrue(all("mood" in t.title.lower() for t in player.songs_panel.songs))
+
+    def test_search_backspace_removes_last_character_live(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.handle_input(ord("/"))
+        for char in "mood":
+            player.handle_input(ord(char))
+
+        player.handle_input(curses.KEY_BACKSPACE)
+
+        self.assertEqual(player.songs_panel.filter_query, "moo")
+
+    def test_search_enter_closes_box_and_keeps_filter(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.handle_input(ord("/"))
+        player.handle_input(ord("x"))
+
+        player.handle_input(ord("\n"))
+
+        self.assertFalse(player._search_mode)
+        self.assertEqual(player.songs_panel.filter_query, "x")
+
+    def test_search_escape_closes_box_and_clears_filter(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.handle_input(ord("/"))
+        player.handle_input(ord("x"))
+
+        player.handle_input(27)
+
+        self.assertFalse(player._search_mode)
+        self.assertEqual(player.songs_panel.filter_query, "")
+
+    def test_typing_q_while_searching_does_not_quit(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.handle_input(ord("/"))
+
+        result = player.handle_input(ord("q"))
+
+        self.assertTrue(result)
+        self.assertTrue(player._search_mode)
+        self.assertEqual(player.songs_panel.filter_query, "q")
+
     def test_handle_songs_input_next_track(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
         player._play_selected_song()
@@ -365,9 +430,9 @@ class Player3ColumnIntegrationTests(unittest.TestCase):
     def test_effective_queue_length_uses_terminal_height(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
         player.settings = dataclasses.replace(player.settings, queue_length=1)
-        player._term_height = 40  # visible rows = 40 - 7 = 33
+        player._term_height = 40  # visible rows = 40 - 8 = 32
 
-        self.assertEqual(player._effective_queue_length(), 33)
+        self.assertEqual(player._effective_queue_length(), 32)
 
     def test_effective_queue_length_floors_at_minimum_of_ten(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
@@ -451,11 +516,13 @@ class ColumnDividerOverlapTests(unittest.TestCase):
         with patch("curses.ACS_VLINE", ord("|"), create=True):
             player._render_layout(stdscr)
 
-        # Songs: row 0 is header, row 1 is path, row 2 is count, row 3 is "[R] Play Random", row 4 is first song.
-        # Queue: row 0 is "Now Playing" header, row 1 is current track (or "(none)"),
-        # row 2 is "Queue (N)" header, row 3 is first upcoming track.
-        songs_row = stdscr.row_text(4)  # first song item
-        queue_row = stdscr.row_text(3)  # first upcoming queue item
+        # Row 0 is the top search bar. Songs: row 1 is header, row 2 is
+        # path, row 3 is count, row 4 is "[R] Play Random", row 5 is first
+        # song. Queue: row 1 is "Now Playing" header, row 2 is current
+        # track (or "(none)"), row 3 is "Queue (N)" header, row 4 is first
+        # upcoming track.
+        songs_row = stdscr.row_text(5)  # first song item
+        queue_row = stdscr.row_text(4)  # first upcoming queue item
         self.assertIn("ZEBRA", songs_row)
         self.assertIn("ZEBRA", queue_row)
 
