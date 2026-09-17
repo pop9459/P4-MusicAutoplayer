@@ -225,6 +225,7 @@ class Player3Column:
             title=track.title if track else "",
             artist=track.artist if track else "",
             track_id=track.id if track else "",
+            position_seconds=self.player_bar.time_pos or 0.0,
         )
 
     def _init_engine_with_song(self, track: TrackRecord) -> None:

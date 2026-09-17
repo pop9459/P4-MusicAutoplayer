@@ -45,14 +45,25 @@ class MprisState:
     title: str = ""
     artist: str = ""
     track_id: str = ""
+    position_seconds: float = 0.0
 
-    def update(self, *, playing: bool, has_track: bool, title: str, artist: str, track_id: str) -> None:
+    def update(
+        self,
+        *,
+        playing: bool,
+        has_track: bool,
+        title: str,
+        artist: str,
+        track_id: str,
+        position_seconds: float = 0.0,
+    ) -> None:
         with self.lock:
             self.playing = playing
             self.has_track = has_track
             self.title = title
             self.artist = artist
             self.track_id = track_id
+            self.position_seconds = position_seconds
 
     def snapshot(self) -> "MprisState":
         with self.lock:
@@ -62,6 +73,7 @@ class MprisState:
                 title=self.title,
                 artist=self.artist,
                 track_id=self.track_id,
+                position_seconds=self.position_seconds,
             )
 
 
@@ -189,6 +201,18 @@ if DBUS_AVAILABLE:
                 "xesam:title": Variant("s", state.title),
                 "xesam:artist": Variant("as", [state.artist] if state.artist else []),
             }
+
+        @dbus_property(access=PropertyAccess.READ)
+        def Position(self) -> "x":  # noqa: N802
+            # Desktop media widgets (e.g. GNOME Shell's quick-settings
+            # player card) query this unconditionally, regardless of
+            # CanSeek -- an unimplemented property here isn't just
+            # inaccurate, it's a crash: dbus-next's default properties
+            # handler raises DBusError on an unknown property name, and
+            # that traceback lands on stderr, which shares this terminal
+            # with curses. MPRIS reports Position in microseconds.
+            state = self._state.snapshot()
+            return int(state.position_seconds * 1_000_000)
 
         @dbus_property(access=PropertyAccess.READ)
         def CanPlay(self) -> "b":  # noqa: N802
