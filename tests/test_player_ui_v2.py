@@ -535,6 +535,17 @@ class ColumnDividerOverlapTests(unittest.TestCase):
         self.assertIn("ZEBRA", songs_row)
         self.assertIn("ZEBRA", queue_row)
 
+        # row_text() returns the whole terminal row (all 3 columns share
+        # one character grid), so the checks above alone can pass on a
+        # false positive -- e.g. the queue column's own "ZEBRA - Track"
+        # text landing on the same physical row as the songs column,
+        # regardless of what the songs column itself drew. Slice out just
+        # the songs column's own character range (width=80: folders is 16
+        # wide, songs starts at col 17) to confirm "ZEBRA" genuinely comes
+        # from the songs column's artist text, not queue bleed-through.
+        songs_column_only = songs_row[17:48]
+        self.assertIn("ZEBRA", songs_column_only)
+
 
 class QueueRenderTests(unittest.TestCase):
     """Issue #1: queue rows must not be numbered."""
@@ -586,6 +597,52 @@ class SongsRenderTests(unittest.TestCase):
 
         self.assertEqual(row_no_scroll, row_scrolled)
         self.assertEqual(row_no_scroll, 3)  # below the name/path/count header rows
+
+    def test_song_row_shows_title_artist_and_duration(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        track = dataclasses.replace(
+            self.catalog.tracks[0], title="Zebra Title", artist="Zeta Artist", duration=185.0,
+        )
+        player.songs_panel.songs = [track]
+        player.songs_panel.selected_index = 0
+
+        stdscr = FakeStdscr(width=60)
+        player._render_songs(stdscr, row=0, col=0, width=60, height=10)
+
+        song_row = next(text for _row, _col, text, _attr in stdscr.calls if "Zebra Title" in text)
+        self.assertIn("Zeta Artist", song_row)
+        self.assertIn("3:05", song_row)  # 185s = 3:05
+
+    def test_song_row_shows_placeholder_when_duration_unknown(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        track = dataclasses.replace(
+            self.catalog.tracks[0], title="No Duration Track", artist="Someone", duration=None,
+        )
+        player.songs_panel.songs = [track]
+        player.songs_panel.selected_index = 0
+
+        stdscr = FakeStdscr(width=60)
+        player._render_songs(stdscr, row=0, col=0, width=60, height=10)
+
+        song_row = next(text for _row, _col, text, _attr in stdscr.calls if "No Duration Track" in text)
+        self.assertIn("--:--", song_row)
+
+    def test_song_row_does_not_crash_on_narrow_width(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        track = dataclasses.replace(
+            self.catalog.tracks[0],
+            title="A Very Long Title That Will Not Fit",
+            artist="A Very Long Artist Name",
+            duration=185.0,
+        )
+        player.songs_panel.songs = [track]
+        player.songs_panel.selected_index = 0
+
+        stdscr = FakeStdscr(width=20)
+        player._render_songs(stdscr, row=0, col=0, width=20, height=10)  # must not raise
+
+        for _row, _col, text, _attr in stdscr.calls:
+            self.assertLessEqual(len(text), 19)
 
 
 class ColorAndFocusTests(unittest.TestCase):
