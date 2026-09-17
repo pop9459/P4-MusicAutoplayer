@@ -133,6 +133,22 @@ class PollMprisTaskTests(unittest.TestCase):
 
         self.assertNotEqual(player.engine.current_track.id, initial_track.id)
 
+    def test_previous_action_goes_back(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
+        player._queue_task.done.wait(timeout=5)
+        player._mpris_service = MprisService()
+        original_track = player.engine.current_track
+
+        player._mpris_service.actions.push("next")
+        player._poll_mpris_task()
+        self.assertNotEqual(player.engine.current_track.id, original_track.id)
+
+        player._mpris_service.actions.push("previous")
+        player._poll_mpris_task()
+
+        self.assertEqual(player.engine.current_track.id, original_track.id)
+
     def test_stop_action_calls_backend_stop(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
         player._play_selected_song()

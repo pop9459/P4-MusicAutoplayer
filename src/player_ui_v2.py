@@ -208,6 +208,8 @@ class Player3Column:
                     self.player_bar.set_paused(self.backend.toggle_pause())
             elif action == "next":
                 self._advance_track()
+            elif action == "previous":
+                self._go_back_track()
             elif action == "stop":
                 if self.engine:
                     self.backend.stop()

@@ -1,7 +1,8 @@
 """org.mpris.MediaPlayer2 D-Bus service so desktop media keys (Play/Pause,
-Next, Stop) can control playback even when the TUI's terminal isn't
-OS-focused -- this is the standard mechanism Linux desktop environments use
-to route hardware media keys to the "now playing" application.
+Next, Previous, Stop) can control playback even when the TUI's terminal
+isn't OS-focused -- this is the standard mechanism Linux desktop
+environments use to route hardware media keys to the "now playing"
+application.
 
 Runs dbus-next's asyncio event loop on a background daemon thread. That
 thread never touches curses/mpv/`PlayerEngine` directly: D-Bus method calls
@@ -67,8 +68,8 @@ class MprisState:
 @dataclass
 class MprisActionQueue:
     """Thread-safe FIFO of requested actions ("play_pause"/"play"/"pause"/
-    "next"/"stop"), pushed by D-Bus method calls on the asyncio thread,
-    drained by `Player3Column._poll_mpris_task` on the main thread."""
+    "next"/"previous"/"stop"), pushed by D-Bus method calls on the asyncio
+    thread, drained by `Player3Column._poll_mpris_task` on the main thread."""
 
     lock: threading.Lock = field(default_factory=threading.Lock)
     _pending: list[str] = field(default_factory=list)
@@ -170,12 +171,7 @@ if DBUS_AVAILABLE:
 
         @method()
         def Previous(self):  # noqa: N802
-            # This player has no "go back" concept -- history only grows
-            # forward (see PlayerEngine.history/advance_immediate), so
-            # there's no track to return to. Declared as a no-op because
-            # MPRIS clients expect the method to exist; CanGoPrevious below
-            # reports False so well-behaved clients won't call it.
-            pass
+            self._actions.push("previous")
 
         @dbus_property(access=PropertyAccess.READ)
         def PlaybackStatus(self) -> "s":  # noqa: N802
@@ -208,7 +204,7 @@ if DBUS_AVAILABLE:
 
         @dbus_property(access=PropertyAccess.READ)
         def CanGoPrevious(self) -> "b":  # noqa: N802
-            return False
+            return True
 
         @dbus_property(access=PropertyAccess.READ)
         def CanSeek(self) -> "b":  # noqa: N802
