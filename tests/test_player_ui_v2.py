@@ -633,6 +633,33 @@ class CoverArtIntegrationTests(unittest.TestCase):
         player = Player3Column(self.library, self.settings, self.backend)
         self.assertFalse(player._cover_art_supported)
 
+    def test_cover_art_rows_is_zero_when_unsupported(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = False
+        self.assertEqual(player._cover_art_rows(60), 0)
+
+    def test_cover_art_rows_scales_with_terminal_height(self) -> None:
+        """Regression test: a flat row count made the reserved cover art
+        box (and the square image sized within it) the same size no
+        matter how tall the terminal was -- it must grow with term_height."""
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = True
+
+        short = player._cover_art_rows(24)
+        tall = player._cover_art_rows(60)
+
+        self.assertGreater(tall, short)
+
+    def test_cover_art_rows_floors_at_minimum(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = True
+        self.assertGreaterEqual(player._cover_art_rows(1), 6)
+
+    def test_cover_art_rows_caps_at_maximum(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = True
+        self.assertLessEqual(player._cover_art_rows(1000), 20)
+
     def test_should_retransmit_on_track_change(self) -> None:
         self.assertTrue(
             Player3Column._cover_art_should_retransmit("b", (24, 80), "a", (24, 80))

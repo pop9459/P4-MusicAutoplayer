@@ -49,7 +49,8 @@ POLL_INTERVAL_MS = 200
 # "Now Playing" line -- so the queue column can show
 # height - 1 - 4 - 3 = height - 8 rows before needing to scroll. Does NOT
 # include cover art rows -- see Player3Column._queue_chrome_rows(), which
-# adds COVER_ART_ROWS on top of this only when the terminal supports it.
+# adds Player3Column._cover_art_rows(term_height) on top of this only when
+# the terminal supports it.
 QUEUE_COLUMN_CHROME_ROWS = 8
 
 SEARCH_BAR_ROWS = 1
@@ -59,7 +60,15 @@ SEARCH_BAR_ROWS = 1
 # once at startup from kitty_graphics_supported()) -- on an unsupported
 # terminal this reserves nothing, so the queue column's layout is
 # unchanged from before this feature existed.
-COVER_ART_ROWS = 8
+#
+# A fraction of the terminal's height, not a flat constant: cell pixel
+# size doesn't change with terminal size, so a flat row count produced a
+# cover art box whose on-screen size never changed no matter how the
+# terminal was resized. Scaling with term_height makes a taller terminal
+# show a bigger (still square) image, like the rest of this layout does.
+COVER_ART_HEIGHT_FRACTION = 1 / 3
+MIN_COVER_ART_ROWS = 6
+MAX_COVER_ART_ROWS = 20
 
 # Only one image is ever shown at a time (the current track's), so a fixed
 # id is safe -- each new transmission is preceded by an explicit delete of
@@ -208,14 +217,27 @@ class Player3Column:
         first engine build in __init__, which runs before curses starts.
         """
         height = self._term_height or shutil.get_terminal_size().lines
-        visible_rows = max(0, height - self._queue_chrome_rows())
+        visible_rows = max(0, height - self._queue_chrome_rows(height))
         return max(MIN_QUEUE_LENGTH, self.settings.queue_length, visible_rows)
 
-    def _queue_chrome_rows(self) -> int:
-        """QUEUE_COLUMN_CHROME_ROWS, plus COVER_ART_ROWS when this
-        terminal supports Kitty graphics (see self._cover_art_supported)."""
-        extra = COVER_ART_ROWS if self._cover_art_supported else 0
-        return QUEUE_COLUMN_CHROME_ROWS + extra
+    def _queue_chrome_rows(self, term_height: int) -> int:
+        """QUEUE_COLUMN_CHROME_ROWS, plus cover art's reserved rows when
+        this terminal supports Kitty graphics (see self._cover_art_supported)."""
+        return QUEUE_COLUMN_CHROME_ROWS + self._cover_art_rows(term_height)
+
+    def _cover_art_rows(self, term_height: int) -> int:
+        """Rows reserved above "Now Playing" for cover art -- a fraction
+        of term_height (see COVER_ART_HEIGHT_FRACTION), so the reserved
+        box (and the square image sized within it) scales with the
+        terminal instead of staying a fixed pixel size regardless of how
+        the window is resized. 0 when this terminal doesn't support Kitty
+        graphics, so an unsupported terminal reserves nothing."""
+        if not self._cover_art_supported:
+            return 0
+        return max(
+            MIN_COVER_ART_ROWS,
+            min(MAX_COVER_ART_ROWS, round(term_height * COVER_ART_HEIGHT_FRACTION)),
+        )
 
     def _begin_queue_task(self, steps_factory) -> None:
         """Start building/topping-up the queue on a background thread so
@@ -851,7 +873,7 @@ class Player3Column:
         # Search bar takes the top line; player bar takes the bottom 4.
         content_top = SEARCH_BAR_ROWS
         content_bottom = height - 4
-        cover_art_rows = COVER_ART_ROWS if self._cover_art_supported else 0
+        cover_art_rows = self._cover_art_rows(height)
         queue_col = col_width_folders + col_width_songs + 1
         queue_row = content_top + cover_art_rows
 
@@ -927,7 +949,8 @@ class Player3Column:
 
         self._cover_art_track_id = track_id
         self._cover_art_drawn_dims = dims
-        self._write_cover_art_bytes(track, row, col, box_width, max(1, COVER_ART_ROWS - 1))
+        box_height = max(1, self._cover_art_rows(term_height) - 1)
+        self._write_cover_art_bytes(track, row, col, box_width, box_height)
 
     def _write_cover_art_bytes(
         self, track: TrackRecord | None, row: int, col: int, cols: int, rows: int
