@@ -103,6 +103,15 @@ def canonicalize_genre(value: str | None) -> str:
     if cleaned in exact_alias_map:
         return exact_alias_map[cleaned]
 
+    # A label the grouping tree names explicitly keeps its own identity. The
+    # keyword folding below is deliberately broad, so without this it would
+    # swallow labels the tree exists to distinguish -- "synthpop" contains
+    # "pop" and "indie rock" contains "rock", and folding either one destroys
+    # exactly the distinction _GENRE_TREE was built to preserve, then lands it
+    # in the wrong family on the way out.
+    if cleaned in _GENRE_TREE:
+        return cleaned
+
     # Real-world genre tags are highly fragmented (e.g. "australian rock",
     # "classic rock", "album rock" are all just "rock"). Without folding
     # these into broad families, genre similarity can't bridge related

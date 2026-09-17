@@ -71,13 +71,29 @@ For `summary`, `list-tracks`, `inspect-track`, and `recommend`, a missing catalo
 python -m src.cli summary --catalog data/tracks.json --music-dir testTracks
 ```
 
-The scanner obtains artist and title from filenames formatted as `Artist - Title.ext`, and reads `genre`, `year`, `album`, and `bpm` from embedded audio tags (via `mutagen`) when present, falling back to `unknown`/`None` if a file has no tags or can't be read. Genre tags are canonicalized into broad families (e.g. "classic rock", "album rock", "glam rock" → `rock`) so cross-artist similarity works even when raw tags are highly specific.
+The scanner obtains artist and title from filenames formatted as `Artist - Title.ext`, and reads `genre`, `year`, `album`, and `bpm` from embedded audio tags (via `mutagen`) when present, falling back to `unknown`/`None` if a file has no tags or can't be read. Genre tags are canonicalized into broad families (e.g. "classic rock", "album rock", "glam rock" → `rock`) so cross-artist similarity works even when raw tags are highly specific — except for labels `_GENRE_TREE` names explicitly, which keep their own identity and gain a `(subfamily, family)` grouping instead, so "synthpop" is not flattened into "pop".
 
 ### Feature weighting
 
-Track vectors combine four weighted blocks so genre/tempo/era drive similarity more than a raw artist match: `genre=0.35`, `bpm=0.25`, `year=0.20`, `artist=0.20` (see `FEATURE_WEIGHTS` in `src/track_analyzer.py`). Rebuild the catalog after upgrading so existing catalogs pick up real tag data and the new weighting.
+Similarity is computed **per pair from metadata**, not from vectors in a shared feature space. `track_similarity(a, b)` sums four independent 0..1 terms weighted by `FEATURE_WEIGHTS` (`src/track_analyzer.py`): `genre=0.45`, `bpm=0.25`, `artist=0.20`, `year=0.10`.
 
-**Note:** a track that shares both genre *and* artist with the current track will still score a perfect match (cosine similarity 1.0) — this is mathematically unavoidable when every weighted dimension agrees. If a queue feels too repetitive within one artist/genre, raise `--top-k`/`--randomness` (or the `top_k`/`randomness` settings) so ties don't dominate the sampling pool.
+The load-bearing detail is what happens to a **missing** signal. A term where either side has no usable data returns `None` and is *skipped*, and the remaining weights are renormalized over what is left — it is not scored as zero, and "unknown" is not treated as a value that matches other unknowns. That per-pair renormalization is why one weight table works whether or not the library carries BPM tags: with none, genre/artist/year simply share the whole budget.
+
+Because `Catalog.track_features` is derived on load rather than persisted, a canonicalization fix applies on the next run without rescanning anything.
+
+**Note:** two tracks that agree on every compared field score exactly 1.0. That is a statement about the data — there is nothing left in the metadata to tell them apart — not an artifact of the scoring. Repetitive queues are handled by queue-assembly filters (`top_k`/`randomness`, the artist-repeat cap, the work-key cooldown), not by inventing a difference the tags do not contain.
+
+### Judging a recommender change
+
+Three tools, in increasing cost and decreasing proxy-ness. See "Key conventions" in `CLAUDE.md` for which to reach for.
+
+```bash
+python tools/recommender_report.py    # session shape: saturation, drift, breadth, repeats
+python tools/eval_holdout.py          # album-mate retrieval against a random baseline
+python tools/ab_listen.py             # blind A/B listening test, with a p-value
+```
+
+Measured on the reference library: album-mate retrieval scores P@1 0.710 against a 0.000 random baseline, and in blind listening the recommender beat a uniform-random control 12-0 (p=0.0005) and a same-genre random control 10-2 (p=0.039). Beating the same-genre control is the one that matters — it means the tempo, artist and era terms are audible, not just the genre filter. A third run testing `w_bpm=0` came back 10-6 (p=0.454), i.e. no audible difference, which is why the weights are left as they are despite the offline ablation preferring a change.
 
 ### Dependencies
 

@@ -9,3 +9,7 @@ data/library.json
 # Generated Python bytecode.
 __pycache__/
 *.py[cod]
+
+# Blind listening-test verdicts (see eval/README.md). Personal data,
+# and deliberately never read by anything under src/.
+eval/*.jsonl

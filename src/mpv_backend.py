@@ -15,6 +15,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 
 class MpvUnavailableError(RuntimeError):
@@ -107,9 +108,42 @@ class MpvBackend:
                     return message
         raise MpvUnavailableError("No response received from mpv IPC socket.")
 
-    def load_file(self, path: str) -> None:
+    def load_file(self, path: str, paused: bool = False) -> None:
+        """Load `path`, playing it immediately unless `paused` is set.
+
+        `paused=True` exists for excerpt playback: pausing *before* the
+        loadfile means no audio escapes while the caller seeks to an offset.
+        Loading unpaused and seeking afterwards emits an audible blip of the
+        track's intro first, which is exactly the part a blind listening test
+        must not reveal.
+        """
+        if paused:
+            self._send(["set_property", "pause", True])
+            self._send(["loadfile", path, "replace"])
+            return
         self._send(["loadfile", path, "replace"])
         self._send(["set_property", "pause", False])
+
+    def seek(self, position: float, mode: str = "absolute") -> None:
+        """Jump to `position` seconds in the currently loaded file."""
+        self._send(["seek", position, mode])
+
+    def wait_until_playable(self, timeout: float = 5.0, sleep: Callable[[float], None] = time.sleep) -> float | None:
+        """Block until the loaded file reports a duration; return it, or None.
+
+        mpv silently drops a seek issued before the file is demuxed, so
+        anything seeking into a freshly loaded file has to wait for this
+        first. `sleep` is injectable so tests need no wall-clock delay.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._process.poll() is not None:
+                return None
+            duration = self.get_duration()
+            if duration is not None:
+                return duration
+            sleep(0.05)
+        return None
 
     def pause(self) -> None:
         self._send(["set_property", "pause", True])

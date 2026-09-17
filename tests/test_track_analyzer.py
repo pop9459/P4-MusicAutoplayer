@@ -55,8 +55,22 @@ class CanonicalizeGenreTests(unittest.TestCase):
         self.assertEqual(canonicalize_genre("trap"), "hip-hop")
 
     def test_electronic_family_variants_collapse(self) -> None:
-        for variant in ["Eurodance", "Big Room", "Dutch House", "Techno", "Dubstep"]:
+        for variant in ["Big Room", "Dutch House", "Techno", "Dubstep"]:
             self.assertEqual(canonicalize_genre(variant), "electronic")
+
+    def test_a_label_the_tree_names_is_not_folded_into_a_broad_family(self) -> None:
+        """`_GENRE_TREE` is the single source of truth for the labels it names.
+
+        "Eurodance" used to collapse to "electronic" here while the tree
+        grouped it under `(disco, pop)` -- so the tree entry was unreachable
+        and the label landed in a family its author had not chosen. The two
+        tables now agree, with the tree deciding. Reverting this for a
+        particular label is a one-line deletion from `_GENRE_TREE`.
+        """
+        self.assertEqual(canonicalize_genre("Eurodance"), "eurodance")
+        self.assertEqual(genre_grouping("eurodance"), ("disco", "pop"))
+        self.assertEqual(canonicalize_genre("Synthpop"), "synthpop")
+        self.assertEqual(genre_grouping("synthpop"), ("synth", "electronic"))
 
     def test_pop_family_catches_uncommon_pop_variants(self) -> None:
         self.assertEqual(canonicalize_genre("Slovak Pop"), "pop")
@@ -98,6 +112,28 @@ class GenreGroupingTests(unittest.TestCase):
         self.assertEqual(genre_grouping("unknown"), (None, None))
         self.assertEqual(genre_grouping("speedrun"), (None, None))
         self.assertEqual(genre_grouping("meme"), (None, None))
+
+    def test_every_tree_label_survives_canonicalization(self) -> None:
+        """Canonicalization runs before grouping, so a label the tree names
+        must still be that label afterwards.
+
+        This is the assertion that catches the two stages disagreeing.
+        "synthpop" once canonicalized to "pop" and "eurodance" to
+        "electronic", which made their tree entries unreachable *and* put
+        them in the wrong family -- the exact collapse _GENRE_TREE exists to
+        prevent.
+        """
+        for label, grouping in _GENRE_TREE.items():
+            with self.subTest(label=label):
+                self.assertEqual(canonicalize_genre(label), label)
+                self.assertEqual(genre_grouping(canonicalize_genre(label)), grouping)
+
+    def test_broad_folding_still_applies_to_labels_the_tree_does_not_name(self) -> None:
+        # The tree exemption must not disable the keyword folding generally:
+        # fragmented real-world tags still have to collapse.
+        self.assertEqual(canonicalize_genre("Glam Rock"), "rock")
+        self.assertEqual(canonicalize_genre("Australian Rock"), "rock")
+        self.assertEqual(canonicalize_genre("Dance Pop"), "pop")
 
 
 class YearAndBpmParsingTests(unittest.TestCase):

@@ -70,6 +70,35 @@ class MpvBackendIpcTests(unittest.TestCase):
         self.assertEqual(fake_socket.sent_commands[0], ["loadfile", "/music/track.mp3", "replace"])
         self.assertEqual(fake_socket.sent_commands[1], ["set_property", "pause", False])
 
+    def test_load_file_paused_pauses_before_loading_so_no_audio_escapes(self) -> None:
+        # Excerpt playback seeks after loading; unpausing first would let the
+        # track's intro out of the speakers before the seek lands.
+        backend, fake_socket = _make_backend({})
+        backend.load_file("/music/track.mp3", paused=True)
+
+        self.assertEqual(fake_socket.sent_commands[0], ["set_property", "pause", True])
+        self.assertEqual(fake_socket.sent_commands[1], ["loadfile", "/music/track.mp3", "replace"])
+        self.assertNotIn(["set_property", "pause", False], fake_socket.sent_commands)
+
+    def test_seek_sends_an_absolute_seek(self) -> None:
+        backend, fake_socket = _make_backend({})
+        backend.seek(42.5)
+
+        self.assertEqual(fake_socket.sent_commands[0], ["seek", 42.5, "absolute"])
+
+    def test_wait_until_playable_returns_the_duration_once_mpv_reports_one(self) -> None:
+        backend, _ = _make_backend({})
+        durations = [None, None, 180.0]
+
+        with patch.object(backend, "get_duration", side_effect=durations):
+            self.assertEqual(backend.wait_until_playable(sleep=lambda _s: None), 180.0)
+
+    def test_wait_until_playable_gives_up_rather_than_blocking_forever(self) -> None:
+        backend, _ = _make_backend({})
+
+        with patch.object(backend, "get_duration", return_value=None):
+            self.assertIsNone(backend.wait_until_playable(timeout=0.01, sleep=lambda _s: None))
+
     def test_pause_and_resume_send_expected_commands(self) -> None:
         backend, fake_socket = _make_backend({})
         backend.pause()

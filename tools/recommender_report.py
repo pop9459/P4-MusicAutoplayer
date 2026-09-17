@@ -27,10 +27,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.library import load_library  # noqa: E402
-from src.player import PlayerEngine  # noqa: E402
 from src.predictor import rank_candidates  # noqa: E402
 from src.settings import DEFAULT_SETTINGS_PATH, load_settings  # noqa: E402
 from src.track_analyzer import Catalog, TrackRecord, genre_grouping, track_similarity  # noqa: E402
+from tools._session import play_session  # noqa: E402
 
 # A top-1 score at or above this is a tie for practical purposes: the tracks
 # agree on every field the scoring can see, so which one plays next is
@@ -83,25 +83,6 @@ def report_saturation(catalog: Catalog, tracks: list[TrackRecord], rng: random.R
     print(f"  mean top-1 similarity       {_mean(top_scores):.3f}")
 
 
-def _play_session(catalog: Catalog, seed: TrackRecord, length: int, rng_seed: int, settings) -> list[TrackRecord]:
-    engine = PlayerEngine(
-        catalog,
-        seed,
-        top_k=settings.top_k,
-        randomness=settings.randomness,
-        queue_length=settings.queue_length,
-        rng=random.Random(rng_seed),
-        max_consecutive_same_artist=settings.max_consecutive_same_artist,
-    )
-    played = [seed]
-    for _ in range(length):
-        next_track = engine.advance()
-        if next_track is None:
-            break
-        played.append(next_track)
-    return played
-
-
 def report_sessions(
     catalog: Catalog,
     tracks: list[TrackRecord],
@@ -123,7 +104,7 @@ def report_sessions(
     artist_shares = []
 
     for index, seed in enumerate(seeds):
-        played = _play_session(catalog, seed, length, rng_seed=index, settings=settings)
+        played = play_session(catalog, seed, length, rng_seed=index, settings=settings)
         if len(played) < max(10, length // 2):
             continue
         to_seed = [_similarity(catalog, played[0], track) for track in played[1:]]
