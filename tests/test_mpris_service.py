@@ -51,7 +51,10 @@ class MprisActionQueueTests(unittest.TestCase):
 class MprisStateTests(unittest.TestCase):
     def test_update_and_snapshot_round_trip(self) -> None:
         state = MprisState()
-        state.update(playing=True, has_track=True, title="Title", artist="Artist", track_id="abc")
+        state.update(
+            playing=True, has_track=True, title="Title", artist="Artist",
+            track_id="abc", position_seconds=61.5,
+        )
 
         snapshot = state.snapshot()
 
@@ -60,6 +63,13 @@ class MprisStateTests(unittest.TestCase):
         self.assertEqual(snapshot.title, "Title")
         self.assertEqual(snapshot.artist, "Artist")
         self.assertEqual(snapshot.track_id, "abc")
+        self.assertEqual(snapshot.position_seconds, 61.5)
+
+    def test_position_seconds_defaults_to_zero(self) -> None:
+        state = MprisState()
+        state.update(playing=True, has_track=True, title="Title", artist="Artist", track_id="abc")
+
+        self.assertEqual(state.snapshot().position_seconds, 0.0)
 
     def test_snapshot_is_a_copy(self) -> None:
         state = MprisState()
@@ -170,6 +180,22 @@ class PollMprisTaskTests(unittest.TestCase):
         self.assertTrue(state.has_track)
         self.assertEqual(state.title, player.engine.current_track.title)
         self.assertEqual(state.artist, player.engine.current_track.artist)
+
+    def test_poll_mpris_task_forwards_playback_position(self) -> None:
+        """Regression test: an unimplemented Position property makes any
+        MPRIS client that queries it (e.g. GNOME Shell's media widget)
+        crash the D-Bus service with an unhandled DBusError, whose
+        traceback is printed straight to the terminal curses shares --
+        garbling the whole TUI. Position must always be servable."""
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
+        player.player_bar.update_progress(61.5, 180.0)
+        player._mpris_service = MprisService()
+
+        player._poll_mpris_task()
+
+        state = player._mpris_service.state.snapshot()
+        self.assertEqual(state.position_seconds, 61.5)
 
     def test_poll_mpris_task_state_mirror_without_engine(self) -> None:
         player = Player3Column(self.library, self.settings, self.backend)
