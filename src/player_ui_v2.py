@@ -39,6 +39,15 @@ QUEUE_COLUMN_CHROME_ROWS = 8
 
 SEARCH_BAR_ROWS = 1
 
+# Floor for any single column's width (see _compute_column_widths), so a
+# narrow terminal degrades gracefully instead of a column collapsing to
+# zero/negative width.
+MIN_COLUMN_WIDTH = 12
+
+# The folders column shows short names (folder display names, "All
+# Tracks"), so it tolerates a lower floor than songs/queue's free text.
+MIN_FOLDERS_WIDTH = 8
+
 MIN_QUEUE_LENGTH = 10
 
 # Color pair IDs. Initialized lazily in _init_colors() (only once a real
@@ -747,6 +756,25 @@ class Player3Column:
 
         self.settings_panel.apply_text_edit(value)
 
+    @staticmethod
+    def _compute_column_widths(width: int) -> tuple[int, int, int]:
+        """Split the terminal width into (folders, songs, queue) column
+        widths. Spotify-like: the track list gets most of the space, the
+        folder and queue rails are narrow side columns -- folders ~1/12,
+        queue ~1/4, songs the remainder (~67%). Folders is intentionally
+        half of the songs/queue-style 1/6 a sibling column would get: it
+        only ever shows short names, so it needs less room than free text.
+
+        Floored (MIN_FOLDERS_WIDTH for folders, MIN_COLUMN_WIDTH for the
+        other two) so a narrow terminal can't collapse a column to zero or
+        negative width (no such floor existed before this -- the old
+        20/40/40 split had the same latent gap, it just needed a narrower
+        terminal to hit it)."""
+        col_width_folders = max(MIN_FOLDERS_WIDTH, width // 12)
+        col_width_queue = max(MIN_COLUMN_WIDTH, width // 4)
+        col_width_songs = max(1, width - col_width_folders - col_width_queue)
+        return col_width_folders, col_width_songs, col_width_queue
+
     def _render_layout(self, stdscr: curses._CursesWindow) -> None:
         """Render full 3-column layout."""
         if not self._colors_ready:
@@ -761,10 +789,7 @@ class Player3Column:
             stdscr.refresh()
             return
 
-        # Columns: 20% folders, 40% songs, 40% queue
-        col_width_folders = width // 5
-        col_width_songs = (width * 2) // 5
-        col_width_queue = width - col_width_folders - col_width_songs
+        col_width_folders, col_width_songs, col_width_queue = self._compute_column_widths(width)
 
         # Search bar takes the top line; player bar takes the bottom 4.
         content_top = SEARCH_BAR_ROWS
