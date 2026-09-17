@@ -5,5 +5,5 @@
   "top_k": 5,
   "randomness": 0.15,
   "queue_length": 50,
-  "max_consecutive_same_artist": 3
+  "max_consecutive_same_artist": 2
 }
