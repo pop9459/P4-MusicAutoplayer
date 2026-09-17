@@ -8,7 +8,7 @@ A local, offline music recommender/player. It scans mp3 folders into a central J
 
 ## Commands
 
-Install dependencies (`mutagen` for tag reading, `dbus-next` for the MPRIS media-key service):
+Install dependencies (`mutagen` for tag reading, `dbus-next` for the MPRIS media-key service, `Pillow` for normalizing embedded cover art to PNG before Kitty-graphics transmission):
 
 ```bash
 pip install -r requirements.txt
@@ -87,6 +87,7 @@ There is no build step or lint configuration in this repo.
 - `src/player.py` contains `PlayerEngine` — stateful queue/playback logic and track filtering, testable without curses or mpv.
 - `src/bpm_analyzer.py` detects tempo from the audio via an optional, lazily-imported `aubio`, for libraries whose files carry no BPM tag (the common case). Stores the raw estimate — half/double-time equivalence is handled by `_bpm_similarity`'s circular log2 distance, not by folding the stored value, which would put a seam in the middle of the scale. Resumable via `tracks_needing_bpm`. Two entry points: `analyze_tracks` (synchronous, used by the CLI, checkpoints through a callback) and `start_bpm_task` → `BpmTask` (background thread, used by the TUI). `BpmTask` follows the same rule as `library.ScanTask` — the thread never touches curses/mpv/the catalog; it only reads each track's path and publishes results into a lock-guarded dict that the UI thread `drain()`s and applies, so the live catalog is only ever written from one thread.
 - `src/mpv_backend.py` controls one background `mpv` process over its Unix JSON IPC socket.
+- `src/cover_art.py` extracts the currently-playing track's embedded cover art (ID3 `APIC`/MP4 `covr`/FLAC `Picture`/OGG's base64 `metadata_block_picture` — never a network album-art lookup) and renders it via the Kitty terminal graphics protocol, entirely local like the rest of this codebase. Deliberately separate from `track_analyzer.py`: art is extracted lazily for one track at a time and never persisted to `data/library.json` (unlike everything `track_analyzer.py` reads, which does get saved to the catalog), so keeping it out of that module makes the "never touches the catalog" boundary structural rather than a rule to remember. Only activates when `kitty_graphics_supported()` detects `TERM=xterm-kitty`/`KITTY_WINDOW_ID` at startup; otherwise the queue column renders exactly as it did before this existed, with zero reserved space. The env check runs once in `Player3Column.__init__`, so it's naturally inert (and untested-terminal-safe) throughout the test suite, which never runs inside a real Kitty session.
 - `src/mpris_service.py` runs an `org.mpris.MediaPlayer2` D-Bus service on a background thread (`dbus-next`, asyncio-based) so hardware media keys (Play/Pause, Next) control playback even when the terminal isn't OS-focused. The D-Bus thread never touches curses/mpv/`PlayerEngine` directly: it pushes requested actions onto a lock-guarded `MprisActionQueue`, drained once per `run_loop` tick by `Player3Column._poll_mpris_task`, which applies them through the same methods a keypress would use. Fails soft (no session bus, `dbus-next` missing) rather than raising, so `Player3Column` construction stays safe for tests.
 
 ### UI modules (v2, 3-column layout — current)
