@@ -23,6 +23,23 @@ from src.track_analyzer import load_catalog
 from tests.curses_stub import FakeStdscr
 
 
+# Player3Column.__init__ calls kitty_graphics_supported(), which reads the
+# real TERM/KITTY_WINDOW_ID env vars -- so whether it comes back True or
+# False depends on the shell running the tests, not on the code under
+# test. Pin it False for every Player3Column built in this module (cover
+# art's own behavior is tested separately in CoverArtIntegrationTests,
+# which overrides the instance attribute directly), so nothing here writes
+# real Kitty escape sequences to whatever terminal happens to be running
+# the test suite.
+def setUpModule() -> None:
+    global _cover_art_patcher
+    _cover_art_patcher = patch("src.player_ui_v2.kitty_graphics_supported", return_value=False)
+    _cover_art_patcher.start()
+
+
+def tearDownModule() -> None:
+    _cover_art_patcher.stop()
+
 
 def _library_from_catalog(catalog):
     """Wrap a loaded testTracks catalog in a single-folder Library, mutating
@@ -595,6 +612,160 @@ class ColumnWidthTests(unittest.TestCase):
 
         with patch("curses.ACS_VLINE", ord("|"), create=True):
             player._render_layout(stdscr)  # must not raise
+
+
+class CoverArtIntegrationTests(unittest.TestCase):
+    """Issue #32: cover art on the Kitty graphics protocol. Every test
+    here either overrides _cover_art_supported directly or relies on the
+    module-level patch (see setUpModule above) that pins it False by
+    default -- none of this should ever write real escape sequences to
+    the terminal running the test suite."""
+
+    def setUp(self) -> None:
+        self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.library = _library_from_catalog(self.catalog)
+        self.settings = load_settings()
+        self.backend = MagicMock(spec=MpvBackend)
+
+    def test_default_construction_does_not_support_cover_art_in_tests(self) -> None:
+        """Regression guard for the env-leak this was built to avoid: the
+        module patch must actually be in effect."""
+        player = Player3Column(self.library, self.settings, self.backend)
+        self.assertFalse(player._cover_art_supported)
+
+    def test_cover_art_rows_is_zero_when_unsupported(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = False
+        self.assertEqual(player._cover_art_rows(60), 0)
+
+    def test_cover_art_rows_scales_with_terminal_height(self) -> None:
+        """Regression test: a flat row count made the reserved cover art
+        box (and the square image sized within it) the same size no
+        matter how tall the terminal was -- it must grow with term_height."""
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = True
+
+        short = player._cover_art_rows(24)
+        tall = player._cover_art_rows(60)
+
+        self.assertGreater(tall, short)
+
+    def test_cover_art_rows_floors_at_minimum(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = True
+        self.assertGreaterEqual(player._cover_art_rows(1), 6)
+
+    def test_cover_art_rows_caps_at_maximum(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = True
+        self.assertLessEqual(player._cover_art_rows(1000), 20)
+
+    def test_should_retransmit_on_track_change(self) -> None:
+        self.assertTrue(
+            Player3Column._cover_art_should_retransmit("b", (24, 80), "a", (24, 80))
+        )
+
+    def test_should_retransmit_on_resize(self) -> None:
+        self.assertTrue(
+            Player3Column._cover_art_should_retransmit("a", (30, 100), "a", (24, 80))
+        )
+
+    def test_should_not_retransmit_when_unchanged(self) -> None:
+        self.assertFalse(
+            Player3Column._cover_art_should_retransmit("a", (24, 80), "a", (24, 80))
+        )
+
+    def test_should_retransmit_on_first_call(self) -> None:
+        self.assertTrue(
+            Player3Column._cover_art_should_retransmit("a", (24, 80), None, None)
+        )
+
+    def test_render_cover_art_noop_when_unsupported(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = False
+        player._write_cover_art_bytes = MagicMock()
+
+        player._render_cover_art(0, 0, 20, 24, 80)
+
+        player._write_cover_art_bytes.assert_not_called()
+
+    def test_render_cover_art_dedups_repeated_calls(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = True
+        player._write_cover_art_bytes = MagicMock()
+        player.queue_panel.current_track = self.catalog.tracks[0]
+
+        player._render_cover_art(0, 0, 20, 24, 80)
+        player._render_cover_art(0, 0, 20, 24, 80)
+
+        player._write_cover_art_bytes.assert_called_once()
+
+    def test_render_cover_art_retransmits_on_track_change(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = True
+        player._write_cover_art_bytes = MagicMock()
+        player.queue_panel.current_track = self.catalog.tracks[0]
+        player._render_cover_art(0, 0, 20, 24, 80)
+
+        player.queue_panel.current_track = self.catalog.tracks[1]
+        player._render_cover_art(0, 0, 20, 24, 80)
+
+        self.assertEqual(player._write_cover_art_bytes.call_count, 2)
+
+    def test_render_cover_art_retransmits_on_resize(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = True
+        player._write_cover_art_bytes = MagicMock()
+        player.queue_panel.current_track = self.catalog.tracks[0]
+        player._render_cover_art(0, 0, 20, 24, 80)
+
+        player._render_cover_art(0, 0, 20, 30, 100)
+
+        self.assertEqual(player._write_cover_art_bytes.call_count, 2)
+
+    def test_shutdown_writes_delete_when_supported_and_shown(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = True
+        player._cover_art_track_id = "some-track"
+
+        with patch("src.player_ui_v2.sys.stdout") as mock_stdout:
+            player._shutdown_cover_art()
+
+        mock_stdout.buffer.write.assert_called_once_with(b"\x1b_Ga=d,d=i,i=1\x1b\\")
+
+    def test_shutdown_noop_when_unsupported(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = False
+        player._cover_art_track_id = "some-track"
+
+        with patch("src.player_ui_v2.sys.stdout") as mock_stdout:
+            player._shutdown_cover_art()
+
+        mock_stdout.buffer.write.assert_not_called()
+
+    def test_shutdown_noop_when_nothing_shown(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._cover_art_supported = True
+        player._cover_art_track_id = None
+
+        with patch("src.player_ui_v2.sys.stdout") as mock_stdout:
+            player._shutdown_cover_art()
+
+        mock_stdout.buffer.write.assert_not_called()
+
+    def test_layout_unaffected_when_cover_art_unsupported(self) -> None:
+        """Regression guard: on the default (unsupported) path, the queue
+        column renders identically to before this feature existed."""
+        player = Player3Column(self.library, self.settings, self.backend)
+        player.queue_panel.update_queue(self.catalog.tracks[:3])
+        player._colors_ready = True
+        self.assertFalse(player._cover_art_supported)
+
+        stdscr = FakeStdscr(height=24, width=80)
+        with patch("curses.ACS_VLINE", ord("|"), create=True):
+            player._render_layout(stdscr)
+
+        self.assertIn("Now Playing", stdscr.row_text(1))
 
 
 class QueueRenderTests(unittest.TestCase):

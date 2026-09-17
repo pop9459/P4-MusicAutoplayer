@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from src.library import Library, LibraryFolder
 from src.mpris_service import MprisActionQueue, MprisService, MprisState
@@ -20,6 +20,19 @@ from src.mpv_backend import MpvBackend
 from src.player_ui_v2 import Player3Column
 from src.settings import load_settings
 from src.track_analyzer import load_catalog
+
+
+# See tests/test_player_ui_v2.py's setUpModule for why this is needed:
+# kitty_graphics_supported() reads the real shell's TERM/KITTY_WINDOW_ID,
+# which this test suite must not depend on.
+def setUpModule() -> None:
+    global _cover_art_patcher
+    _cover_art_patcher = patch("src.player_ui_v2.kitty_graphics_supported", return_value=False)
+    _cover_art_patcher.start()
+
+
+def tearDownModule() -> None:
+    _cover_art_patcher.stop()
 
 
 def _library_from_catalog(catalog):

@@ -5,9 +5,22 @@ from __future__ import annotations
 import curses
 import random
 import shutil
+import sys
 from pathlib import Path
 
 from .bpm_analyzer import BpmTask, start_bpm_task, tracks_needing_bpm
+from .cover_art import (
+    _FALLBACK_CELL_HEIGHT_PX,
+    _FALLBACK_CELL_WIDTH_PX,
+    build_cursor_position,
+    build_kitty_delete,
+    build_kitty_transmit_chunks,
+    compute_square_cell_box,
+    extract_cover_art,
+    kitty_graphics_supported,
+    normalize_to_png,
+    terminal_cell_size_px,
+)
 from .folder_panel import FolderPanel
 from .library import (
     Library,
@@ -34,10 +47,33 @@ POLL_INTERVAL_MS = 200
 # budget: _render_layout reserves 1 row for the top search bar and 4 for the
 # player bar, then _render_queue reserves 3 more rows for its own header and
 # "Now Playing" line -- so the queue column can show
-# height - 1 - 4 - 3 = height - 8 rows before needing to scroll.
+# height - 1 - 4 - 3 = height - 8 rows before needing to scroll. Does NOT
+# include cover art rows -- see Player3Column._queue_chrome_rows(), which
+# adds Player3Column._cover_art_rows(term_height) on top of this only when
+# the terminal supports it.
 QUEUE_COLUMN_CHROME_ROWS = 8
 
 SEARCH_BAR_ROWS = 1
+
+# Rows reserved above "Now Playing" for cover art, only when this terminal
+# supports Kitty graphics (Player3Column._cover_art_supported, computed
+# once at startup from kitty_graphics_supported()) -- on an unsupported
+# terminal this reserves nothing, so the queue column's layout is
+# unchanged from before this feature existed.
+#
+# A fraction of the terminal's height, not a flat constant: cell pixel
+# size doesn't change with terminal size, so a flat row count produced a
+# cover art box whose on-screen size never changed no matter how the
+# terminal was resized. Scaling with term_height makes a taller terminal
+# show a bigger (still square) image, like the rest of this layout does.
+COVER_ART_HEIGHT_FRACTION = 1 / 3
+MIN_COVER_ART_ROWS = 6
+MAX_COVER_ART_ROWS = 20
+
+# Only one image is ever shown at a time (the current track's), so a fixed
+# id is safe -- each new transmission is preceded by an explicit delete of
+# the same id, never a second concurrent image.
+COVER_ART_IMAGE_ID = 1
 
 # Floor for any single column's width (see _compute_column_widths), so a
 # narrow terminal degrades gracefully instead of a column collapsing to
@@ -114,6 +150,15 @@ class Player3Column:
         self._stdscr: curses._CursesWindow | None = None
         self._term_height: int | None = None
 
+        # Checked once at startup, not per-render-tick: whether this
+        # terminal understands the Kitty graphics protocol. Reads real
+        # os.environ, so it's False for every Player3Column built by the
+        # test suite (none of which run inside an actual Kitty session) --
+        # no special-casing needed to keep existing tests unaffected.
+        self._cover_art_supported: bool = kitty_graphics_supported()
+        self._cover_art_track_id: str | None = None
+        self._cover_art_drawn_dims: tuple[int, int] | None = None
+
         # Init folder panel
         self.folder_panel.load_from_library(library)
         if self.folder_panel.selected_entry:
@@ -172,8 +217,27 @@ class Player3Column:
         first engine build in __init__, which runs before curses starts.
         """
         height = self._term_height or shutil.get_terminal_size().lines
-        visible_rows = max(0, height - QUEUE_COLUMN_CHROME_ROWS)
+        visible_rows = max(0, height - self._queue_chrome_rows(height))
         return max(MIN_QUEUE_LENGTH, self.settings.queue_length, visible_rows)
+
+    def _queue_chrome_rows(self, term_height: int) -> int:
+        """QUEUE_COLUMN_CHROME_ROWS, plus cover art's reserved rows when
+        this terminal supports Kitty graphics (see self._cover_art_supported)."""
+        return QUEUE_COLUMN_CHROME_ROWS + self._cover_art_rows(term_height)
+
+    def _cover_art_rows(self, term_height: int) -> int:
+        """Rows reserved above "Now Playing" for cover art -- a fraction
+        of term_height (see COVER_ART_HEIGHT_FRACTION), so the reserved
+        box (and the square image sized within it) scales with the
+        terminal instead of staying a fixed pixel size regardless of how
+        the window is resized. 0 when this terminal doesn't support Kitty
+        graphics, so an unsupported terminal reserves nothing."""
+        if not self._cover_art_supported:
+            return 0
+        return max(
+            MIN_COVER_ART_ROWS,
+            min(MAX_COVER_ART_ROWS, round(term_height * COVER_ART_HEIGHT_FRACTION)),
+        )
 
     def _begin_queue_task(self, steps_factory) -> None:
         """Start building/topping-up the queue on a background thread so
@@ -681,6 +745,7 @@ class Player3Column:
             self._event_loop(stdscr)
         finally:
             self._shutdown_bpm_task()
+            self._shutdown_cover_art()
 
     def _event_loop(self, stdscr: curses._CursesWindow) -> None:
         while True:
@@ -791,6 +856,16 @@ class Player3Column:
         if self.mode == "settings":
             self._render_settings(stdscr, height, width)
             stdscr.refresh()
+            # A previously-transmitted Kitty image sits on the terminal's
+            # own graphics layer, underneath whatever curses draws next --
+            # it would otherwise show through the settings screen. Clear
+            # it and reset tracking so player mode re-transmits it on
+            # return, rather than trying to overlay/coordinate with the
+            # settings screen.
+            if self._cover_art_supported and self._cover_art_track_id is not None:
+                self._write_cover_art_bytes(None, 0, 0, 0, 0)
+                self._cover_art_track_id = None
+                self._cover_art_drawn_dims = None
             return
 
         col_width_folders, col_width_songs, col_width_queue = self._compute_column_widths(width)
@@ -798,6 +873,9 @@ class Player3Column:
         # Search bar takes the top line; player bar takes the bottom 4.
         content_top = SEARCH_BAR_ROWS
         content_bottom = height - 4
+        cover_art_rows = self._cover_art_rows(height)
+        queue_col = col_width_folders + col_width_songs + 1
+        queue_row = content_top + cover_art_rows
 
         self._render_search_bar(stdscr, 0, width)
 
@@ -812,11 +890,12 @@ class Player3Column:
             stdscr, content_top, col_width_folders + 1, col_width_songs - 1, content_bottom
         )
 
-        # Render queue, same one-column offset for the same reason.
+        # Render queue, same one-column offset for the same reason, shifted
+        # down past the reserved cover art block (zero rows if unsupported).
         self._render_queue(
             stdscr,
-            content_top,
-            col_width_folders + col_width_songs + 1,
+            queue_row,
+            queue_col,
             col_width_queue - 1,
             content_bottom,
         )
@@ -830,6 +909,98 @@ class Player3Column:
         self._render_player_bar(stdscr, height - 3, width)
 
         stdscr.refresh()
+
+        # After refresh, so curses' own screen updates don't clobber the
+        # real terminal cursor position Kitty needs to place the image at.
+        self._render_cover_art(content_top, queue_col, col_width_queue - 1, height, width)
+
+    @staticmethod
+    def _cover_art_should_retransmit(
+        current_track_id: str | None,
+        current_dims: tuple[int, int],
+        last_track_id: str | None,
+        last_dims: tuple[int, int] | None,
+    ) -> bool:
+        """True iff the track changed or the terminal was resized since
+        the last transmit -- re-transmitting on every render tick would be
+        wasteful (re-reads the file, re-decodes the image, writes a
+        potentially large escape sequence) for no visible benefit."""
+        return current_track_id != last_track_id or current_dims != last_dims
+
+    def _render_cover_art(
+        self, row: int, col: int, box_width: int, term_height: int, term_width: int
+    ) -> None:
+        """No-op if this terminal doesn't support Kitty graphics. Otherwise
+        re-transmits the current track's cover art only when the track or
+        the terminal's dimensions changed since the last transmit (a
+        resize can shift where the queue column starts, so the previously
+        placed image would otherwise end up misaligned)."""
+        if not self._cover_art_supported:
+            return
+
+        track = self.queue_panel.current_track
+        track_id = track.id if track else None
+        dims = (term_height, term_width)
+
+        if not self._cover_art_should_retransmit(
+            track_id, dims, self._cover_art_track_id, self._cover_art_drawn_dims
+        ):
+            return
+
+        self._cover_art_track_id = track_id
+        self._cover_art_drawn_dims = dims
+        box_height = max(1, self._cover_art_rows(term_height) - 1)
+        self._write_cover_art_bytes(track, row, col, box_width, box_height)
+
+    def _write_cover_art_bytes(
+        self, track: TrackRecord | None, row: int, col: int, cols: int, rows: int
+    ) -> None:
+        """The deliberately-thin, untested-by-nature part -- mirrors why
+        run_loop() itself isn't unit tested. Writes straight to
+        sys.stdout.buffer rather than through curses, since curses has no
+        notion of the Kitty graphics protocol and would corrupt or strip
+        the escape sequence. Always deletes the previous image first (a
+        no-op on the terminal side if none was shown), then transmits a
+        new one only if `track` has embedded art.
+
+        `cols`/`rows` is the maximum available box; Kitty stretches the
+        image to exactly fill whatever box it's given regardless of the
+        source image's own aspect ratio, so a plain "fill the whole
+        column" box left album art (virtually always square) visibly
+        stretched. Query the terminal's real cell pixel size (falling
+        back to an assumed ~2:1 height:width ratio if unavailable) and
+        pick the largest square that fits, with a 1-column margin so it
+        doesn't crowd the queue column's edge."""
+        sys.stdout.buffer.write(build_kitty_delete(COVER_ART_IMAGE_ID))
+
+        if track is not None:
+            art = extract_cover_art(track.path)
+            if art is not None:
+                png_bytes = normalize_to_png(art[0])
+                if png_bytes is not None:
+                    cell_size = terminal_cell_size_px(sys.stdout.fileno())
+                    cell_width_px, cell_height_px = cell_size or (
+                        _FALLBACK_CELL_WIDTH_PX,
+                        _FALLBACK_CELL_HEIGHT_PX,
+                    )
+                    square_cols, square_rows = compute_square_cell_box(
+                        max(1, cols - 1), max(1, rows), cell_width_px, cell_height_px
+                    )
+                    sys.stdout.buffer.write(build_cursor_position(row, col))
+                    for chunk in build_kitty_transmit_chunks(
+                        png_bytes, COVER_ART_IMAGE_ID, square_cols, square_rows
+                    ):
+                        sys.stdout.buffer.write(chunk)
+
+        sys.stdout.buffer.flush()
+
+    def _shutdown_cover_art(self) -> None:
+        """Delete the displayed Kitty image (if any) so it doesn't persist
+        as a stale artifact in the terminal after the TUI quits."""
+        if not self._cover_art_supported or self._cover_art_track_id is None:
+            return
+        sys.stdout.buffer.write(build_kitty_delete(COVER_ART_IMAGE_ID))
+        sys.stdout.buffer.flush()
 
     def _render_search_bar(self, stdscr: curses._CursesWindow, row: int, width: int) -> None:
         """Persistent top-of-screen search bar (Spotify-style): open with
