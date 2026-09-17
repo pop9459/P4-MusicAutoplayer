@@ -84,7 +84,11 @@ class Player3Column:
         self.settings_panel = SettingsPanel()
 
         self.engine: PlayerEngine | None = None
-        self.active_column = 0  # 0=folders, 1=songs
+        # Default to the songs column, not folders: the "All Tracks" entry
+        # is already the default selection (FolderPanel.load_from_library),
+        # so the common path -- open the app, browse/play a track -- starts
+        # one Tab press closer to where the user actually lands.
+        self.active_column = 1  # 0=folders, 1=songs
         self.mode = "player"  # "player" | "settings"
 
         self._colors_ready = False
