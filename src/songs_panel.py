@@ -1,11 +1,22 @@
 """Middle column: songs from selected folder, selection."""
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field
 
 from .folder_panel import FolderEntry
 from .library import ALL_TRACKS_FOLDER_ID, Library
 from .track_analyzer import Catalog, TrackRecord
+
+
+def _normalize_for_search(text: str) -> str:
+    """Fold to lowercase and strip diacritics (NFKD decomposition, drop
+    combining marks), so a plain "a" query matches "á", "e" matches "é",
+    etc. -- most keyboards have no easy way to type the accented form, so
+    requiring it to search would make half a library's non-English tags
+    unsearchable."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).lower()
 
 
 SORT_MODES = ("default", "title", "artist", "album")
@@ -57,11 +68,12 @@ class SongsPanel:
         divergent copies of the same logic."""
         songs = self.all_songs
         if self.filter_query:
-            query = self.filter_query.lower()
+            query = _normalize_for_search(self.filter_query)
             songs = [
                 track
                 for track in songs
-                if query in track.title.lower() or query in track.artist.lower()
+                if query in _normalize_for_search(track.title)
+                or query in _normalize_for_search(track.artist)
             ]
         key_fn = _SORT_KEY_FNS.get(self.sort_mode)
         if key_fn is not None:

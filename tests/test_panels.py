@@ -9,7 +9,7 @@ from src.library import ALL_TRACKS_FOLDER_ID, Library, LibraryFolder
 from src.player_bar import PlayerBar
 from src.queue_panel import QueuePanel
 from src.settings import Settings, load_settings
-from src.songs_panel import SongsPanel
+from src.songs_panel import SongsPanel, _normalize_for_search
 from src.track_analyzer import Catalog, TrackRecord, build_catalog, load_catalog
 
 
@@ -59,6 +59,17 @@ class FolderPanelTests(unittest.TestCase):
         panel.next_folder()
         panel.previous_folder()
         self.assertEqual(panel.selected_index, 0)
+
+
+class NormalizeForSearchTests(unittest.TestCase):
+    def test_strips_diacritics(self) -> None:
+        self.assertEqual(_normalize_for_search("á é í ó ú ñ ü"), "a e i o u n u")
+
+    def test_lowercases(self) -> None:
+        self.assertEqual(_normalize_for_search("HELLO"), "hello")
+
+    def test_plain_ascii_is_unchanged_besides_case(self) -> None:
+        self.assertEqual(_normalize_for_search("Rock N Roll"), "rock n roll")
 
 
 class SongsPanelTests(unittest.TestCase):
@@ -142,6 +153,24 @@ class SongsPanelTests(unittest.TestCase):
         panel.load_songs_from_library(self.library, self._all_tracks_entry())
         panel.apply_filter("ARTIST A")
         self.assertEqual([track.id for track in panel.songs], ["a1", "a2"])
+
+    def test_apply_filter_plain_query_matches_accented_title(self) -> None:
+        panel = SongsPanel()
+        panel.all_songs = [
+            TrackRecord(id="1", path="/m/1.mp3", title="Nezastavís", artist="4D"),
+        ]
+        panel.songs = list(panel.all_songs)
+        panel.apply_filter("nezastavis")
+        self.assertEqual([t.id for t in panel.songs], ["1"])
+
+    def test_apply_filter_accented_query_matches_plain_title(self) -> None:
+        panel = SongsPanel()
+        panel.all_songs = [
+            TrackRecord(id="1", path="/m/1.mp3", title="Nezastavis", artist="4D"),
+        ]
+        panel.songs = list(panel.all_songs)
+        panel.apply_filter("nezastavís")
+        self.assertEqual([t.id for t in panel.songs], ["1"])
 
     def test_apply_filter_empty_query_clears_filter(self) -> None:
         panel = SongsPanel()
