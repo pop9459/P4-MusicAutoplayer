@@ -107,6 +107,21 @@ class MpvBackendIpcTests(unittest.TestCase):
         self.assertEqual(fake_socket.sent_commands[0], ["set_property", "pause", True])
         self.assertEqual(fake_socket.sent_commands[1], ["set_property", "pause", False])
 
+    def test_set_normalize_volume_true_adds_labeled_dynaudnorm_filter(self) -> None:
+        backend, fake_socket = _make_backend({})
+        backend.set_normalize_volume(True)
+
+        self.assertEqual(
+            fake_socket.sent_commands[0],
+            ["af", "add", "@normalize:lavfi=[dynaudnorm]"],
+        )
+
+    def test_set_normalize_volume_false_removes_labeled_filter(self) -> None:
+        backend, fake_socket = _make_backend({})
+        backend.set_normalize_volume(False)
+
+        self.assertEqual(fake_socket.sent_commands[0], ["af", "remove", "@normalize"])
+
     def test_toggle_pause_flips_current_state(self) -> None:
         responses = {"get_property": {"error": "success", "data": False}}
         backend, fake_socket = _make_backend(responses)

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .settings import Settings
 
-FIELDS = ("top_k", "randomness", "queue_length", "library_path")
+FIELDS = ("top_k", "randomness", "queue_length", "normalize_volume", "library_path")
 
 RANDOMNESS_STEP = 0.05
 
@@ -21,6 +21,7 @@ class SettingsPanel:
     top_k: int = 1
     randomness: float = 0.0
     queue_length: int = 1
+    normalize_volume: bool = False
     library_path: Path = field(default_factory=Path)
     field_index: int = 0
     editing_text: bool = False
@@ -33,6 +34,7 @@ class SettingsPanel:
         self.top_k = settings.top_k
         self.randomness = settings.randomness
         self.queue_length = settings.queue_length
+        self.normalize_volume = settings.normalize_volume
         self.library_path = settings.library_path
         self.field_index = 0
         self.editing_text = False
@@ -56,6 +58,8 @@ class SettingsPanel:
             self.randomness = round(min(1.0, self.randomness + RANDOMNESS_STEP), 2)
         elif field_name == "queue_length":
             self.queue_length += 1
+        elif field_name == "normalize_volume":
+            self.normalize_volume = not self.normalize_volume
 
     def decrement(self) -> None:
         field_name = self.current_field()
@@ -65,6 +69,8 @@ class SettingsPanel:
             self.randomness = round(max(0.0, self.randomness - RANDOMNESS_STEP), 2)
         elif field_name == "queue_length":
             self.queue_length = max(1, self.queue_length - 1)
+        elif field_name == "normalize_volume":
+            self.normalize_volume = not self.normalize_volume
 
     def begin_text_edit(self) -> None:
         """Start editing `library_path` as free text (only editable text field)."""
@@ -91,6 +97,7 @@ class SettingsPanel:
             self.top_k != self.original.top_k
             or self.randomness != self.original.randomness
             or self.queue_length != self.original.queue_length
+            or self.normalize_volume != self.original.normalize_volume
             or self.library_path != self.original.library_path
         )
 
@@ -102,6 +109,7 @@ class SettingsPanel:
             top_k=self.top_k,
             randomness=self.randomness,
             queue_length=self.queue_length,
+            normalize_volume=self.normalize_volume,
             library_path=self.library_path,
             catalog_path=None,
             music_directory=None,

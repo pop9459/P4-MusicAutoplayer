@@ -18,6 +18,7 @@ class SettingsPanelHydrationTests(unittest.TestCase):
         self.assertEqual(panel.top_k, DEFAULT_SETTINGS.top_k)
         self.assertEqual(panel.randomness, DEFAULT_SETTINGS.randomness)
         self.assertEqual(panel.queue_length, DEFAULT_SETTINGS.queue_length)
+        self.assertEqual(panel.normalize_volume, DEFAULT_SETTINGS.normalize_volume)
         self.assertEqual(panel.library_path, DEFAULT_SETTINGS.library_path)
         self.assertEqual(panel.field_index, 0)
 
@@ -85,6 +86,17 @@ class SettingsPanelAdjustmentTests(unittest.TestCase):
         self.panel.decrement()
         self.assertEqual(self.panel.randomness, 0.0)
 
+    def test_normalize_volume_toggles_on_increment_and_decrement(self) -> None:
+        self.panel.field_index = FIELDS.index("normalize_volume")
+        self.panel.normalize_volume = False
+
+        self.panel.increment()
+        self.assertTrue(self.panel.normalize_volume)
+        self.panel.increment()
+        self.assertFalse(self.panel.normalize_volume)
+        self.panel.decrement()
+        self.assertTrue(self.panel.normalize_volume)
+
     def test_library_path_is_not_affected_by_increment(self) -> None:
         self.panel.field_index = FIELDS.index("library_path")
         original = self.panel.library_path
@@ -150,6 +162,19 @@ class SettingsPanelSaveTests(unittest.TestCase):
         # is the source of truth for folders).
         self.assertIsNone(updated.music_folders)
         self.assertIsNone(updated.music_directory)
+
+    def test_has_changes_true_after_normalize_volume_toggle(self) -> None:
+        self.panel.field_index = FIELDS.index("normalize_volume")
+        self.panel.increment()
+        self.assertTrue(self.panel.has_changes())
+
+    def test_to_settings_reflects_normalize_volume_edit(self) -> None:
+        self.panel.field_index = FIELDS.index("normalize_volume")
+        self.panel.normalize_volume = not DEFAULT_SETTINGS.normalize_volume
+
+        updated = self.panel.to_settings()
+
+        self.assertEqual(updated.normalize_volume, not DEFAULT_SETTINGS.normalize_volume)
 
     def test_to_settings_without_load_raises(self) -> None:
         panel = SettingsPanel()
