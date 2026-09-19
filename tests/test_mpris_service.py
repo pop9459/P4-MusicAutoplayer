@@ -92,6 +92,105 @@ class MprisStateTests(unittest.TestCase):
         self.assertEqual(snapshot.title, "")
 
 
+class MprisServiceUpdateStateTests(unittest.TestCase):
+    """`update_state` must notify D-Bus clients via PropertiesChanged when
+    PlaybackStatus/Metadata actually change -- without this, MPRIS
+    consumers that subscribe to change notifications rather than polling
+    (e.g. most desktop shells) never learn playback started/stopped/
+    changed. No real D-Bus/asyncio loop is used: a constructed-but-never-
+    `start()`-ed MprisService has `_loop`/`_player_interface` wired to
+    plain mocks by hand, mirroring how MprisActionQueue is driven by hand
+    elsewhere in this file."""
+
+    def setUp(self) -> None:
+        self.service = MprisService()
+        self.loop = MagicMock()
+        self.interface = MagicMock()
+        self.service._loop = self.loop
+        self.service._player_interface = self.interface
+
+    def _update(self, **overrides):
+        kwargs = dict(
+            playing=False, has_track=False, title="", artist="", track_id="",
+            position_seconds=0.0,
+        )
+        kwargs.update(overrides)
+        self.service.update_state(**kwargs)
+
+    def test_emits_playback_status_when_playing_changes(self) -> None:
+        self._update(playing=True, has_track=True, title="T", artist="A", track_id="1")
+        self.loop.call_soon_threadsafe.reset_mock()
+
+        self._update(playing=False, has_track=True, title="T", artist="A", track_id="1")
+
+        self.loop.call_soon_threadsafe.assert_called_once_with(
+            self.interface.emit_properties_changed, {"PlaybackStatus": "Paused"}
+        )
+
+    def test_emits_metadata_when_track_changes(self) -> None:
+        self._update(playing=True, has_track=True, title="T1", artist="A1", track_id="1")
+        self.loop.call_soon_threadsafe.reset_mock()
+
+        self._update(playing=True, has_track=True, title="T2", artist="A2", track_id="2")
+
+        self.loop.call_soon_threadsafe.assert_called_once_with(
+            self.interface.emit_properties_changed,
+            {"Metadata": self.interface.Metadata},
+        )
+
+    def test_no_emission_when_nothing_changed(self) -> None:
+        self._update(playing=True, has_track=True, title="T", artist="A", track_id="1")
+        self.loop.call_soon_threadsafe.reset_mock()
+
+        # Same title/artist/track_id/playing/has_track, only position moved
+        # -- the common case once per second while a track plays unchanged.
+        self._update(
+            playing=True, has_track=True, title="T", artist="A", track_id="1",
+            position_seconds=5.0,
+        )
+
+        self.loop.call_soon_threadsafe.assert_not_called()
+
+    def test_emits_metadata_when_only_art_path_changes(self) -> None:
+        self._update(
+            playing=True, has_track=True, title="T", artist="A", track_id="1", art_path="",
+        )
+        self.loop.call_soon_threadsafe.reset_mock()
+
+        self._update(
+            playing=True, has_track=True, title="T", artist="A", track_id="1",
+            art_path="/tmp/x.png",
+        )
+
+        self.loop.call_soon_threadsafe.assert_called_once_with(
+            self.interface.emit_properties_changed,
+            {"Metadata": self.interface.Metadata},
+        )
+
+    def test_no_emission_when_art_path_unchanged(self) -> None:
+        self._update(
+            playing=True, has_track=True, title="T", artist="A", track_id="1",
+            art_path="/tmp/x.png",
+        )
+        self.loop.call_soon_threadsafe.reset_mock()
+
+        self._update(
+            playing=True, has_track=True, title="T", artist="A", track_id="1",
+            art_path="/tmp/x.png",
+        )
+
+        self.loop.call_soon_threadsafe.assert_not_called()
+
+    def test_noop_when_service_never_started(self) -> None:
+        service = MprisService()  # _loop/_player_interface left None
+
+        service.update_state(
+            playing=True, has_track=True, title="T", artist="A", track_id="1",
+        )  # must not raise
+
+        self.assertTrue(service.state.snapshot().playing)
+
+
 class PollMprisTaskTests(unittest.TestCase):
     def setUp(self) -> None:
         self.catalog = load_catalog(Path("testTracks/catalog.json"))
@@ -193,6 +292,38 @@ class PollMprisTaskTests(unittest.TestCase):
         self.assertTrue(state.has_track)
         self.assertEqual(state.title, player.engine.current_track.title)
         self.assertEqual(state.artist, player.engine.current_track.artist)
+
+    def test_poll_mpris_task_forwards_art_path(self) -> None:
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
+        player._mpris_service = MprisService()
+
+        with patch(
+            "src.player_ui_v2.cache_art_file", return_value=Path("/tmp/art.png")
+        ) as mock_cache:
+            player._poll_mpris_task()
+
+        mock_cache.assert_called_once()
+        state = player._mpris_service.state.snapshot()
+        self.assertEqual(state.art_path, "/tmp/art.png")
+
+    def test_poll_mpris_task_memoizes_art_path_per_track(self) -> None:
+        """cache_art_file's own on-disk file-exists check already avoids
+        redundant PNG writes across process restarts, but not the
+        mutagen-parse cost within a single run -- _art_path_cache must
+        avoid calling cache_art_file again for the same still-playing
+        track on every tick."""
+        player = Player3Column(self.library, self.settings, self.backend)
+        player._play_selected_song()
+        player._mpris_service = MprisService()
+
+        with patch(
+            "src.player_ui_v2.cache_art_file", return_value=None
+        ) as mock_cache:
+            player._poll_mpris_task()
+            player._poll_mpris_task()
+
+        mock_cache.assert_called_once()
 
     def test_poll_mpris_task_forwards_playback_position(self) -> None:
         """Regression test: an unimplemented Position property makes any

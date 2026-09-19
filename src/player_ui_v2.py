@@ -15,7 +15,9 @@ from .cover_art import (
     build_cursor_position,
     build_kitty_delete,
     build_kitty_transmit_chunks,
+    cache_art_file,
     compute_square_cell_box,
+    default_art_cache_dir,
     extract_cover_art,
     kitty_graphics_supported,
     normalize_to_png,
@@ -149,6 +151,12 @@ class Player3Column:
         # Player3Column is constructed directly (no curses/D-Bus) throughout
         # the test suite. Started from run_loop instead, once curses is live.
         self._mpris_service: MprisService | None = None
+        # Memoizes _resolve_art_path's cache_art_file() result per track id
+        # -- cache_art_file's own on-disk file-exists check already avoids
+        # redundant PNG writes, but not the mutagen-parse cost, which would
+        # otherwise repeat every _poll_mpris_task tick for a track with no
+        # embedded art (there's no on-disk file to short-circuit on).
+        self._art_path_cache: dict[str, str] = {}
 
         # Set once run_loop starts (None beforehand, e.g. during this
         # __init__'s own initial engine setup below, before curses exists).
@@ -307,8 +315,20 @@ class Player3Column:
             title=track.title if track else "",
             artist=track.artist if track else "",
             track_id=track.id if track else "",
+            art_path=self._resolve_art_path(track),
             position_seconds=self.player_bar.time_pos or 0.0,
         )
+
+    def _resolve_art_path(self, track: TrackRecord | None) -> str:
+        """`track`'s cached cover-art PNG path for MPRIS's mpris:artUrl, or
+        "" if it has none -- memoized per track id in self._art_path_cache
+        (see its declaration for why)."""
+        if track is None:
+            return ""
+        if track.id not in self._art_path_cache:
+            cached = cache_art_file(track.id, track.path, default_art_cache_dir())
+            self._art_path_cache[track.id] = str(cached) if cached else ""
+        return self._art_path_cache[track.id]
 
     def _init_engine_with_song(self, track: TrackRecord) -> None:
         """Initialize player engine with starting track.

@@ -19,6 +19,7 @@ import asyncio
 import re
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 
 try:
     from dbus_next import PropertyAccess, Variant
@@ -45,6 +46,7 @@ class MprisState:
     title: str = ""
     artist: str = ""
     track_id: str = ""
+    art_path: str = ""
     position_seconds: float = 0.0
 
     def update(
@@ -55,6 +57,7 @@ class MprisState:
         title: str,
         artist: str,
         track_id: str,
+        art_path: str = "",
         position_seconds: float = 0.0,
     ) -> None:
         with self.lock:
@@ -63,6 +66,7 @@ class MprisState:
             self.title = title
             self.artist = artist
             self.track_id = track_id
+            self.art_path = art_path
             self.position_seconds = position_seconds
 
     def snapshot(self) -> "MprisState":
@@ -73,6 +77,7 @@ class MprisState:
                 title=self.title,
                 artist=self.artist,
                 track_id=self.track_id,
+                art_path=self.art_path,
                 position_seconds=self.position_seconds,
             )
 
@@ -100,6 +105,14 @@ def _sanitize_track_id(track_id: str) -> str:
     """A D-Bus object path segment may only contain [A-Za-z0-9_]."""
     sanitized = re.sub(r"[^A-Za-z0-9_]", "_", track_id)
     return sanitized or "none"
+
+
+def _playback_status(state: MprisState) -> str:
+    """Shared by `_PlayerInterface.PlaybackStatus` and `MprisService`'s
+    change-detection so the two can never drift out of sync."""
+    if not state.has_track:
+        return "Stopped"
+    return "Playing" if state.playing else "Paused"
 
 
 if DBUS_AVAILABLE:
@@ -187,20 +200,22 @@ if DBUS_AVAILABLE:
 
         @dbus_property(access=PropertyAccess.READ)
         def PlaybackStatus(self) -> "s":  # noqa: N802
-            state = self._state.snapshot()
-            if not state.has_track:
-                return "Stopped"
-            return "Playing" if state.playing else "Paused"
+            return _playback_status(self._state.snapshot())
 
         @dbus_property(access=PropertyAccess.READ)
         def Metadata(self) -> "a{sv}":  # noqa: N802
             state = self._state.snapshot()
             track_id = _sanitize_track_id(state.track_id)
-            return {
+            metadata = {
                 "mpris:trackid": Variant("o", f"{OBJECT_PATH}/Track/{track_id}"),
                 "xesam:title": Variant("s", state.title),
                 "xesam:artist": Variant("as", [state.artist] if state.artist else []),
             }
+            if state.art_path:
+                # Path.as_uri() handles percent-encoding correctly, unlike
+                # a manual f"file://{path}" concatenation.
+                metadata["mpris:artUrl"] = Variant("s", Path(state.art_path).as_uri())
+            return metadata
 
         @dbus_property(access=PropertyAccess.READ)
         def Position(self) -> "x":  # noqa: N802
@@ -252,6 +267,11 @@ class MprisService:
         self.actions = MprisActionQueue()
         self.available = False
         self._thread: threading.Thread | None = None
+        # Set from the D-Bus thread once the service is actually exported
+        # (see `_async_main`); stay None if `start()` was never called or
+        # the connection failed, so `update_state` can no-op safely.
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._player_interface: "_PlayerInterface | None" = None
 
     def start(self) -> None:
         if not DBUS_AVAILABLE:
@@ -270,10 +290,60 @@ class MprisService:
     async def _async_main(self) -> None:
         bus = await MessageBus().connect()
         bus.export(OBJECT_PATH, _RootInterface())
-        bus.export(OBJECT_PATH, _PlayerInterface(self.state, self.actions))
+        player_interface = _PlayerInterface(self.state, self.actions)
+        bus.export(OBJECT_PATH, player_interface)
         await bus.request_name(BUS_NAME)
+        self._player_interface = player_interface
+        self._loop = asyncio.get_running_loop()
         self.available = True
         await asyncio.Event().wait()  # run until the process exits (daemon thread)
+
+    def update_state(
+        self,
+        *,
+        playing: bool,
+        has_track: bool,
+        title: str,
+        artist: str,
+        track_id: str,
+        art_path: str = "",
+        position_seconds: float = 0.0,
+    ) -> None:
+        """Refresh the state mirror and, if `PlaybackStatus`/`Metadata`
+        actually changed, notify D-Bus clients via `PropertiesChanged` --
+        without this, MPRIS consumers that subscribe to change
+        notifications rather than polling (e.g. most desktop shells) never
+        learn playback started/stopped/changed, even though the property
+        values themselves are correct whenever directly queried."""
+        old = self.state.snapshot()
+        self.state.update(
+            playing=playing,
+            has_track=has_track,
+            title=title,
+            artist=artist,
+            track_id=track_id,
+            art_path=art_path,
+            position_seconds=position_seconds,
+        )
+        new = self.state.snapshot()
+
+        if self._loop is None or self._player_interface is None:
+            return
+
+        changed: dict[str, object] = {}
+        if _playback_status(old) != _playback_status(new):
+            changed["PlaybackStatus"] = _playback_status(new)
+        if (old.title, old.artist, old.track_id, old.art_path) != (
+            new.title, new.artist, new.track_id, new.art_path,
+        ):
+            changed["Metadata"] = self._player_interface.Metadata
+
+        if changed:
+            # update_state runs on the curses main thread; the interface
+            # lives on the D-Bus thread's own asyncio loop.
+            self._loop.call_soon_threadsafe(
+                self._player_interface.emit_properties_changed, changed
+            )
 
     def shutdown(self) -> None:
         # Daemon thread with no cross-thread asyncio cancellation wired up;

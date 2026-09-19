@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import base64
 import io
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -19,7 +21,9 @@ from src.cover_art import (
     build_cursor_position,
     build_kitty_delete,
     build_kitty_transmit_chunks,
+    cache_art_file,
     compute_square_cell_box,
+    default_art_cache_dir,
     extract_cover_art,
     kitty_graphics_supported,
     normalize_to_png,
@@ -315,6 +319,71 @@ class ComputeSquareCellBoxTests(unittest.TestCase):
 
     def test_zero_cell_size_falls_back_to_bounds(self) -> None:
         self.assertEqual(compute_square_cell_box(10, 8, 0.0, 20.0), (10, 8))
+
+
+class DefaultArtCacheDirTests(unittest.TestCase):
+    def test_respects_xdg_cache_home(self) -> None:
+        with patch("src.cover_art.os.environ", {"XDG_CACHE_HOME": "/xdg/cache"}):
+            self.assertEqual(
+                default_art_cache_dir(), Path("/xdg/cache/p4-musicautoplayer/art")
+            )
+
+    def test_falls_back_to_home_cache_when_unset(self) -> None:
+        with patch("src.cover_art.os.environ", {}):
+            self.assertEqual(
+                default_art_cache_dir(), Path.home() / ".cache" / "p4-musicautoplayer" / "art"
+            )
+
+
+class CacheArtFileTests(unittest.TestCase):
+    def test_writes_normalized_png_and_returns_its_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "art"
+            with (
+                patch("src.cover_art.extract_cover_art", return_value=(b"raw", "image/jpeg")),
+                patch("src.cover_art.normalize_to_png", return_value=b"png-bytes"),
+            ):
+                result = cache_art_file("track-1", "track.mp3", cache_dir)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result.is_relative_to(cache_dir))
+            self.assertEqual(result.read_bytes(), b"png-bytes")
+
+    def test_returns_none_when_no_embedded_art(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "art"
+            with patch("src.cover_art.extract_cover_art", return_value=None):
+                result = cache_art_file("track-1", "track.mp3", cache_dir)
+
+            self.assertIsNone(result)
+            self.assertFalse(cache_dir.exists())
+
+    def test_returns_none_when_normalize_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "art"
+            with (
+                patch("src.cover_art.extract_cover_art", return_value=(b"raw", "image/jpeg")),
+                patch("src.cover_art.normalize_to_png", return_value=None),
+            ):
+                result = cache_art_file("track-1", "track.mp3", cache_dir)
+
+            self.assertIsNone(result)
+
+    def test_second_call_skips_extraction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "art"
+            with (
+                patch(
+                    "src.cover_art.extract_cover_art", return_value=(b"raw", "image/jpeg")
+                ) as mock_extract,
+                patch("src.cover_art.normalize_to_png", return_value=b"png-bytes"),
+            ):
+                first = cache_art_file("track-1", "track.mp3", cache_dir)
+                mock_extract.reset_mock()
+                second = cache_art_file("track-1", "track.mp3", cache_dir)
+
+                mock_extract.assert_not_called()
+            self.assertEqual(first, second)
 
 
 if __name__ == "__main__":
