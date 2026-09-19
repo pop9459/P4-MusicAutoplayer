@@ -99,6 +99,24 @@ class AddFolderTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             add_folder(new_library(), self.root / "does_not_exist")
 
+    def test_add_folder_on_existing_path_rescans_and_refreshes_metadata(self) -> None:
+        """Adding an already-tracked path is not a no-op: it rescans, so
+        metadata (e.g. duration) computed before that field existed gets
+        refreshed on a plain re-add rather than needing a separate action."""
+        folder = self.root / "music_a"
+        _make_audio_file(folder / "Artist - Song.mp3")
+        library, first_folder, was_added_1 = add_folder(new_library(), folder)
+        original_track = library.catalog.tracks[0]
+        self.assertIsNone(original_track.duration)
+
+        refreshed_track = replace(original_track, duration=180.0)
+        with mock.patch("src.library.scan_library_with_progress", return_value=[refreshed_track]):
+            library2, second_folder, was_added_2 = add_folder(library, folder)
+
+        self.assertFalse(was_added_2)
+        self.assertEqual(first_folder.id, second_folder.id)
+        self.assertEqual(library2.catalog.tracks[0].duration, 180.0)
+
     def test_add_folder_rebuilds_the_catalog_over_all_tracks(self) -> None:
         """Adding a folder rebuilds the merged catalog, not just the new
         folder's slice: the recorded genre/artist sets and the derived

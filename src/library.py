@@ -118,9 +118,11 @@ def add_folder(
     existing catalog, and rebuild the global feature space over all tracks.
 
     Returns (library, folder, was_added). If the resolved path already
-    matches a tracked folder, returns the existing folder unchanged with
-    was_added=False (a no-op, not an error) so callers can show a
-    "already tracked" message instead of duplicating it.
+    matches a tracked folder, this rescans it instead (see rescan_folder) --
+    refreshing metadata such as duration for files still on disk -- and
+    returns was_added=False so callers can distinguish "added a new folder"
+    from "refreshed an existing one" for their own messaging, even though
+    both branches now mutate and return a real library.
     """
     resolved = Path(path).expanduser().resolve()
     if not resolved.exists():
@@ -130,7 +132,9 @@ def add_folder(
 
     existing = find_folder_by_path(library, resolved)
     if existing is not None:
-        return library, existing, False
+        new_library_value, _ = rescan_folder(library, existing.id, progress_callback=progress_callback)
+        updated_folder = next(f for f in new_library_value.folders if f.id == existing.id)
+        return new_library_value, updated_folder, False
 
     folder_id = _folder_id_from_path(resolved)
     new_tracks = scan_library_with_progress(

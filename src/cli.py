@@ -188,11 +188,9 @@ def _command_add_folder(args: argparse.Namespace, settings: Settings | None = No
 
     new_lib, folder, was_added = add_folder(library, args.path, progress_callback=_print_progress)
     print()
-    if not was_added:
-        print(f"Folder already tracked: {folder.path} (skipped)")
-        return
     save_library(new_lib, library_path)
-    print(f"Added folder {folder.path} ({folder.track_count} tracks). Library saved to {library_path}.")
+    verb = "Added" if was_added else "Rescanned"
+    print(f"{verb} folder {folder.path} ({folder.track_count} tracks). Library saved to {library_path}.")
 
 
 def _command_list_folders(args: argparse.Namespace, settings: Settings | None = None) -> None:

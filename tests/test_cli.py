@@ -85,13 +85,16 @@ class AddFolderCliTests(unittest.TestCase):
         list_output = self._run("list-folders", "--library", str(self.library_path))
         self.assertIn("1 folders, 1 tracks total.", list_output)
 
-    def test_add_folder_twice_is_a_no_op(self) -> None:
+    def test_add_folder_twice_rescans_existing_folder(self) -> None:
         self._run("add-folder", "--path", str(self.music_dir), "--library", str(self.library_path))
         second_output = self._run("add-folder", "--path", str(self.music_dir), "--library", str(self.library_path))
-        self.assertIn("already tracked", second_output)
+        self.assertIn("Rescanned folder", second_output)
 
         list_output = self._run("list-folders", "--library", str(self.library_path))
         self.assertIn("1 folders,", list_output)
+
+        from src.library import load_library
+        self.assertEqual(len(load_library(self.library_path).catalog.tracks), 1)
 
     def test_remove_folder_drops_its_tracks(self) -> None:
         self._run("add-folder", "--path", str(self.music_dir), "--library", str(self.library_path))

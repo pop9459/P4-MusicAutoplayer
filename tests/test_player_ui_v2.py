@@ -1244,8 +1244,10 @@ class BackgroundBpmAnalysisTests(unittest.TestCase):
 
 
 class RescanFolderUiTests(unittest.TestCase):
-    """Pressing R re-scans the selected tracked folder to refresh metadata
-    (e.g. duration) for tracks scanned before that field existed."""
+    """Pressing U re-scans the selected tracked folder without a path
+    prompt, by driving the same add_folder/start_add_folder_task scan the A
+    key uses -- add_folder rescans (refreshing metadata like duration)
+    rather than no-op'ing when given an already-tracked path."""
 
     def setUp(self) -> None:
         self.catalog = load_catalog(Path("testTracks/catalog.json"))
@@ -1260,7 +1262,7 @@ class RescanFolderUiTests(unittest.TestCase):
         player = self._player()
         self.assertEqual(player.folder_panel.selected_entry.id, ALL_TRACKS_FOLDER_ID)
 
-        with patch("src.player_ui_v2.start_rescan_folder_task") as start:
+        with patch("src.player_ui_v2.start_add_folder_task") as start:
             player.handle_folder_input(ord("u"))
 
         start.assert_not_called()
@@ -1269,102 +1271,49 @@ class RescanFolderUiTests(unittest.TestCase):
     def test_rescan_starts_for_selected_folder(self) -> None:
         player = self._player()
         player.folder_panel.select_folder(1)  # the real "testtracks" folder
-        folder_id = player.folder_panel.selected_entry.id
+        folder_path = player.folder_panel.selected_entry.path
 
-        with patch("src.player_ui_v2.start_rescan_folder_task") as start:
+        with patch("src.player_ui_v2.start_add_folder_task") as start:
             player.handle_folder_input(ord("u"))
 
-        start.assert_called_once_with(player.library, folder_id)
-        self.assertIn("Rescanning: 0/0", player.folder_panel.status_message)
-        self.assertIsNotNone(player._rescan_task)
+        start.assert_called_once_with(player.library, Path(folder_path))
+        self.assertIn("Scanning: 0/0", player.folder_panel.status_message)
+        self.assertIsNotNone(player._scan_task)
 
     def test_rescan_refused_while_scan_in_progress(self) -> None:
         player = self._player()
         player.folder_panel.select_folder(1)
         player._scan_task = MagicMock()
 
-        with patch("src.player_ui_v2.start_rescan_folder_task") as start:
+        with patch("src.player_ui_v2.start_add_folder_task") as start:
             player.handle_folder_input(ord("u"))
 
         start.assert_not_called()
-        self.assertIn("Scan in progress", player.folder_panel.status_message)
+        self.assertIn("Scan already in progress", player.folder_panel.status_message)
 
     def test_rescan_refused_while_bpm_analysis_runs(self) -> None:
         player = self._player()
         player.folder_panel.select_folder(1)
         player._bpm_task = MagicMock()
 
-        with patch("src.player_ui_v2.start_rescan_folder_task") as start:
+        with patch("src.player_ui_v2.start_add_folder_task") as start:
             player.handle_folder_input(ord("u"))
 
         start.assert_not_called()
         self.assertIn("Tempo analysis in progress", player.folder_panel.status_message)
 
-    def test_rescan_refused_while_already_rescanning(self) -> None:
+    def test_poll_scan_task_reports_rescanned_when_not_newly_added(self) -> None:
         player = self._player()
         player.folder_panel.select_folder(1)
-        player._rescan_task = MagicMock()
+        folder = next(f for f in player.library.folders if f.id == "testtracks")
 
-        with patch("src.player_ui_v2.start_rescan_folder_task") as start:
-            player.handle_folder_input(ord("u"))
-
-        start.assert_not_called()
-        self.assertIn("Rescan already in progress", player.folder_panel.status_message)
-
-    def test_adding_a_folder_is_refused_while_rescan_runs(self) -> None:
-        player = self._player()
-        player._rescan_task = MagicMock()
-
-        player.handle_folder_input(ord("a"))
-
-        self.assertFalse(player._adding_folder)
-        self.assertIn("Rescan in progress", player.folder_panel.status_message)
-
-    def test_bpm_analysis_is_refused_while_rescan_runs(self) -> None:
-        player = self._player()
-        player._rescan_task = MagicMock()
-
-        with patch("src.player_ui_v2.start_bpm_task") as start:
-            player.handle_folder_input(ord("b"))
-
-        start.assert_not_called()
-        self.assertIn("Rescan in progress", player.folder_panel.status_message)
-
-    def test_poll_reports_progress_while_running(self) -> None:
-        player = self._player()
         task = ScanTask(thread=None)
-        task._progress[0] = 2
-        task._progress[1] = 5
-        player._rescan_task = task
-
-        player._poll_rescan_task()
-
-        self.assertIn("Rescanning: 2/5", player.folder_panel.status_message)
-        self.assertIs(player._rescan_task, task)
-
-    def test_poll_applies_completed_result(self) -> None:
-        player = self._player()
-        task = ScanTask(thread=None)
-        task.result.append((player.library, 5))
+        task.result.append((player.library, folder, False))
         task.done.set()
-        player._rescan_task = task
-        player._rescan_folder_id = "testtracks"
+        player._scan_task = task
 
-        with patch("src.player_ui_v2.save_library") as save:
-            player._poll_rescan_task()
+        with patch("src.player_ui_v2.save_library"):
+            player._poll_scan_task()
 
-        save.assert_called_once()
-        self.assertIsNone(player._rescan_task)
-        self.assertIn("Rescanned (5 tracks)", player.folder_panel.status_message)
-
-    def test_poll_reports_error(self) -> None:
-        player = self._player()
-        task = ScanTask(thread=None)
-        task.error.append(KeyError("missing-id"))
-        task.done.set()
-        player._rescan_task = task
-
-        player._poll_rescan_task()
-
-        self.assertIsNone(player._rescan_task)
-        self.assertIn("Rescan failed", player.folder_panel.status_message)
+        self.assertIsNone(player._scan_task)
+        self.assertIn(f"Rescanned {folder.display_name}", player.folder_panel.status_message)

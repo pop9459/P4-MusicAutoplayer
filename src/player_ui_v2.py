@@ -15,9 +15,7 @@ from .cover_art import (
     build_cursor_position,
     build_kitty_delete,
     build_kitty_transmit_chunks,
-    cache_art_file,
     compute_square_cell_box,
-    default_art_cache_dir,
     extract_cover_art,
     kitty_graphics_supported,
     normalize_to_png,
@@ -28,11 +26,9 @@ from .library import (
     ALL_TRACKS_FOLDER_ID,
     Library,
     ScanTask,
-    find_folder_by_path,
     load_library,
     save_library,
     start_add_folder_task,
-    start_rescan_folder_task,
 )
 from .mpris_service import MprisService, start_mpris_service
 from .mpv_backend import MpvBackend, MpvUnavailableError
@@ -138,9 +134,6 @@ class Player3Column:
         self._adding_folder = False
         self._search_mode = False
 
-        self._rescan_task: ScanTask | None = None
-        self._rescan_folder_id: str | None = None
-
         self._bpm_task: BpmTask | None = None
         self._bpm_applied_since_save = 0
 
@@ -151,12 +144,6 @@ class Player3Column:
         # Player3Column is constructed directly (no curses/D-Bus) throughout
         # the test suite. Started from run_loop instead, once curses is live.
         self._mpris_service: MprisService | None = None
-        # Memoizes _resolve_art_path's cache_art_file() result per track id
-        # -- cache_art_file's own on-disk file-exists check already avoids
-        # redundant PNG writes, but not the mutagen-parse cost, which would
-        # otherwise repeat every _poll_mpris_task tick for a track with no
-        # embedded art (there's no on-disk file to short-circuit on).
-        self._art_path_cache: dict[str, str] = {}
 
         # Set once run_loop starts (None beforehand, e.g. during this
         # __init__'s own initial engine setup below, before curses exists).
@@ -315,20 +302,8 @@ class Player3Column:
             title=track.title if track else "",
             artist=track.artist if track else "",
             track_id=track.id if track else "",
-            art_path=self._resolve_art_path(track),
             position_seconds=self.player_bar.time_pos or 0.0,
         )
-
-    def _resolve_art_path(self, track: TrackRecord | None) -> str:
-        """`track`'s cached cover-art PNG path for MPRIS's mpris:artUrl, or
-        "" if it has none -- memoized per track id in self._art_path_cache
-        (see its declaration for why)."""
-        if track is None:
-            return ""
-        if track.id not in self._art_path_cache:
-            cached = cache_art_file(track.id, track.path, default_art_cache_dir())
-            self._art_path_cache[track.id] = str(cached) if cached else ""
-        return self._art_path_cache[track.id]
 
     def _init_engine_with_song(self, track: TrackRecord) -> None:
         """Initialize player engine with starting track.
@@ -515,9 +490,6 @@ class Player3Column:
             # thread is still producing for the old one.
             self.folder_panel.status_message = "Tempo analysis in progress (B to stop)."
             return
-        if self._rescan_task is not None:
-            self.folder_panel.status_message = "Rescan in progress."
-            return
         self._adding_folder = True
 
     def _begin_add_folder_scan(self, raw_path: str) -> None:
@@ -525,35 +497,27 @@ class Player3Column:
         if not raw_path:
             return
         path = Path(raw_path).expanduser()
-        existing = find_folder_by_path(self.library, path)
-        if existing is not None:
-            self.folder_panel.status_message = (
-                f"Already tracked: {existing.display_name}"
-            )
-            return
         self.folder_panel.status_message = "Scanning: 0/0"
         self._scan_task = start_add_folder_task(self.library, path)
 
     def _begin_rescan_folder(self) -> None:
-        """Re-scan the selected tracked folder to refresh metadata (e.g.
-        duration) for files scanned before that field existed, or that
-        changed on disk since."""
+        """Re-scan the selected tracked folder without a path prompt --
+        its path is already known, so this just drives the same
+        add_folder/start_add_folder_task scan as the A key, which rescans
+        (refreshing metadata like duration) rather than no-op'ing when the
+        path is already tracked."""
         entry = self.folder_panel.selected_entry
         if entry is None or entry.id == ALL_TRACKS_FOLDER_ID:
             self.folder_panel.status_message = "Select a folder to rescan."
             return
         if self._scan_task is not None:
-            self.folder_panel.status_message = "Scan in progress."
+            self.folder_panel.status_message = "Scan already in progress."
             return
         if self._bpm_task is not None:
             self.folder_panel.status_message = "Tempo analysis in progress (B to stop)."
             return
-        if self._rescan_task is not None:
-            self.folder_panel.status_message = "Rescan already in progress."
-            return
-        self.folder_panel.status_message = "Rescanning: 0/0"
-        self._rescan_folder_id = entry.id
-        self._rescan_task = start_rescan_folder_task(self.library, entry.id)
+        self.folder_panel.status_message = "Scanning: 0/0"
+        self._scan_task = start_add_folder_task(self.library, Path(entry.path))
 
     # How many newly detected tempi to accumulate before writing the library
     # back out. Saving costs ~35ms on a 2600-track library, which is well
@@ -569,9 +533,6 @@ class Player3Column:
             return
         if self._scan_task is not None:
             self.folder_panel.status_message = "Scan in progress."
-            return
-        if self._rescan_task is not None:
-            self.folder_panel.status_message = "Rescan in progress."
             return
 
         pending = tracks_needing_bpm(self.library.catalog.tracks)
@@ -690,48 +651,11 @@ class Player3Column:
                 self.library, self.folder_panel.selected_entry
             )
         message = (
-            "Already tracked"
-            if not was_added
-            else f"Added {folder.display_name} ({folder.track_count} tracks)."
+            f"Added {folder.display_name} ({folder.track_count} tracks)."
+            if was_added
+            else f"Rescanned {folder.display_name} ({folder.track_count} tracks)."
         )
         self.folder_panel.status_message = message
-
-    def _poll_rescan_task(self) -> None:
-        """Check on a running folder rescan; apply its result once done."""
-        if self._rescan_task is None:
-            return
-
-        if not self._rescan_task.done.is_set():
-            scanned, total = self._rescan_task.progress()
-            self.folder_panel.status_message = f"Rescanning: {scanned}/{total}"
-            return
-
-        task = self._rescan_task
-        folder_id = self._rescan_folder_id
-        self._rescan_task = None
-        self._rescan_folder_id = None
-
-        if task.error:
-            self.folder_panel.status_message = f"Rescan failed: {task.error[0]}"
-            return
-
-        new_library, track_count = task.result[0]
-        self.library = new_library
-        try:
-            save_library(self.library, self.settings.library_path)
-        except OSError as error:
-            self.folder_panel.status_message = f"Save failed: {error}"
-
-        self.folder_panel.load_from_library(self.library)
-        for index, entry in enumerate(self.folder_panel.entries):
-            if entry.id == folder_id:
-                self.folder_panel.select_folder(index)
-                break
-        if self.folder_panel.selected_entry:
-            self.songs_panel.load_songs_from_library(
-                self.library, self.folder_panel.selected_entry
-            )
-        self.folder_panel.status_message = f"Rescanned ({track_count} tracks)."
 
     def _apply_settings(self) -> None:
         """Persist the edited settings, then live-reapply them."""
@@ -849,7 +773,6 @@ class Player3Column:
             # Render all panels
             self._refresh_progress()
             self._poll_scan_task()
-            self._poll_rescan_task()
             self._poll_bpm_task()
             self._poll_queue_task()
             self._poll_mpris_task()
