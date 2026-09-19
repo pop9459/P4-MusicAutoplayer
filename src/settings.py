@@ -19,6 +19,7 @@ class Settings:
     randomness: float
     queue_length: int
     max_consecutive_same_artist: int | None
+    normalize_volume: bool = False
     # Legacy fields, retained only so pre-library.json settings.json files can
     # be read and migrated (see src/library.py: migrate_settings_to_library).
     # No longer authoritative once library_path exists on disk.
@@ -70,6 +71,20 @@ def _load_max_consecutive_same_artist(payload: dict[str, Any]) -> int | None:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError("Settings field 'max_consecutive_same_artist' must be a positive integer or null")
+    return value
+
+
+def _load_normalize_volume(payload: dict[str, Any]) -> bool:
+    """Optional loudness-normalization toggle; absent means disabled.
+
+    New field with a default, so existing settings.json files without it
+    keep working (same pattern as max_consecutive_same_artist).
+    """
+    if "normalize_volume" not in payload:
+        return False
+    value = payload.get("normalize_volume")
+    if not isinstance(value, bool):
+        raise ValueError("Settings field 'normalize_volume' must be a boolean")
     return value
 
 
@@ -139,6 +154,7 @@ def load_settings(path: str | Path = DEFAULT_SETTINGS_PATH) -> Settings:
         randomness=_require_randomness(payload),
         queue_length=_require_positive_int(payload, "queue_length"),
         max_consecutive_same_artist=_load_max_consecutive_same_artist(payload),
+        normalize_volume=_load_normalize_volume(payload),
         catalog_path=catalog_path,
         music_directory=music_directory,
         music_folders=music_folders,
@@ -163,6 +179,7 @@ def save_settings(settings: Settings, path: str | Path = DEFAULT_SETTINGS_PATH) 
         "randomness": settings.randomness,
         "queue_length": settings.queue_length,
         "max_consecutive_same_artist": settings.max_consecutive_same_artist,
+        "normalize_volume": settings.normalize_volume,
     }
 
     # Legacy fields are only written back if this Settings still carries them

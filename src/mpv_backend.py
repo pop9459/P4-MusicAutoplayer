@@ -182,6 +182,17 @@ class MpvBackend:
         path_loaded = self.get_property("path", default=None)
         return bool(idle_active) and path_loaded is None
 
+    def set_normalize_volume(self, enabled: bool) -> None:
+        """Toggle mpv's dynaudnorm audio filter via a labeled af add/remove.
+
+        Runtime IPC rather than a launch flag, so this can be flipped live
+        from the settings screen without restarting the mpv process.
+        """
+        if enabled:
+            self._send(["af", "add", "@normalize:lavfi=[dynaudnorm]"])
+        else:
+            self._send(["af", "remove", "@normalize"])
+
     def stop(self) -> None:
         self._send(["stop"])
 

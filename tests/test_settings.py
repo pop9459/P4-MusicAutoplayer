@@ -83,6 +83,38 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "randomness"):
             load_settings(self.settings_path)
 
+    def test_normalize_volume_defaults_to_false_when_absent(self) -> None:
+        settings = load_settings(self.settings_path)
+
+        self.assertFalse(settings.normalize_volume)
+
+    def test_normalize_volume_round_trips_through_save_and_load(self) -> None:
+        from dataclasses import replace
+
+        from src.settings import save_settings
+
+        settings = load_settings(self.settings_path)
+        enabled = replace(settings, normalize_volume=True)
+        save_settings(enabled, self.settings_path)
+
+        payload = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        self.assertIs(payload["normalize_volume"], True)
+        self.assertTrue(load_settings(self.settings_path).normalize_volume)
+
+    def test_load_settings_rejects_non_boolean_normalize_volume(self) -> None:
+        self.settings_path.write_text(json.dumps({
+            "version": 1,
+            "catalog_path": "catalog.json",
+            "music_directory": "music",
+            "top_k": 1,
+            "randomness": 0.0,
+            "queue_length": 1,
+            "normalize_volume": "yes",
+        }), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "normalize_volume"):
+            load_settings(self.settings_path)
+
     def test_cli_uses_settings_defaults_and_flags_override_them(self) -> None:
         output = io.StringIO()
         with redirect_stdout(output):

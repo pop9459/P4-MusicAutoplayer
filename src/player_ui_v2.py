@@ -652,7 +652,13 @@ class Player3Column:
             return
 
         library_changed = new_settings.library_path != self.settings.library_path
+        normalize_volume_changed = (
+            new_settings.normalize_volume != self.settings.normalize_volume
+        )
         self.settings = new_settings
+
+        if normalize_volume_changed:
+            self.backend.set_normalize_volume(new_settings.normalize_volume)
 
         if library_changed:
             try:
@@ -1219,6 +1225,7 @@ class Player3Column:
             "top_k": str(panel.top_k),
             "randomness": f"{panel.randomness:.2f}",
             "queue_length": str(panel.queue_length),
+            "normalize_volume": "on" if panel.normalize_volume else "off",
             "library_path": str(panel.library_path),
         }
         row = 2
@@ -1256,6 +1263,7 @@ def run(
     except MpvUnavailableError as error:
         print(str(error))
         return 1
+    backend.set_normalize_volume(settings.normalize_volume)
 
     players: list[Player3Column] = []
     try:
