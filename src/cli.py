@@ -16,6 +16,7 @@ from .library import (
     migrate_settings_to_library,
     new_library,
     remove_folder,
+    rescan_folder,
     save_library,
 )
 from .predictor import generate_queue, rank_candidates, recommend_next_track
@@ -253,6 +254,22 @@ def _command_remove_folder(args: argparse.Namespace, settings: Settings | None =
     print(f"Removed folder {args.folder_id}. {len(new_lib.folders)} folders remain.")
 
 
+def _command_rescan_folder(args: argparse.Namespace, settings: Settings | None = None) -> None:
+    library_path = _resolve_library_path(args, settings)
+    library = load_library(library_path)
+
+    def _print_progress(scanned: int, total: int) -> None:
+        print(f"\rRescanning: {scanned}/{total}", end="", flush=True)
+
+    try:
+        new_lib, track_count = rescan_folder(library, args.folder_id, progress_callback=_print_progress)
+    except KeyError as error:
+        raise SystemExit(str(error)) from error
+    print()
+    save_library(new_lib, library_path)
+    print(f"Rescanned folder {args.folder_id} ({track_count} tracks). Library saved to {library_path}.")
+
+
 def _add_catalog_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--catalog", type=Path, help="Path to the JSON catalog. Defaults to settings.json.")
     parser.add_argument("--music-dir", type=Path, help="Music directory to scan if the catalog does not exist. Defaults to settings.json.")
@@ -320,6 +337,14 @@ def build_parser() -> argparse.ArgumentParser:
     remove_folder_parser.add_argument("--library", type=Path, help="Path to library.json. Defaults to settings.json.")
     remove_folder_parser.set_defaults(handler=_command_remove_folder)
 
+    rescan_folder_parser = subparsers.add_parser(
+        "rescan-folder",
+        help="Re-scan a tracked folder to refresh metadata (e.g. duration) for files still on disk.",
+    )
+    rescan_folder_parser.add_argument("--folder-id", required=True, help="ID of the folder to rescan (see list-folders).")
+    rescan_folder_parser.add_argument("--library", type=Path, help="Path to library.json. Defaults to settings.json.")
+    rescan_folder_parser.set_defaults(handler=_command_rescan_folder)
+
     analyze_bpm_parser = subparsers.add_parser(
         "analyze-bpm",
         help="Detect tempo for library tracks with no BPM (needs the optional 'aubio' package).",
@@ -345,7 +370,7 @@ def _apply_settings_defaults(args: argparse.Namespace, settings: Settings) -> No
         args.max_consecutive_artist = settings.max_consecutive_same_artist
 
 
-_LIBRARY_COMMANDS = {"add-folder", "list-folders", "remove-folder", "analyze-bpm"}
+_LIBRARY_COMMANDS = {"add-folder", "list-folders", "remove-folder", "rescan-folder", "analyze-bpm"}
 
 
 def _needs_settings(args: argparse.Namespace) -> bool:

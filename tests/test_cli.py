@@ -115,6 +115,23 @@ class AddFolderCliTests(unittest.TestCase):
         after = set(self.music_dir.iterdir())
         self.assertEqual(before, after)
 
+    def test_rescan_folder_reports_summary_and_keeps_track_count(self) -> None:
+        from src.library import load_library
+
+        self._run("add-folder", "--path", str(self.music_dir), "--library", str(self.library_path))
+        folder_id = load_library(self.library_path).folders[0].id
+
+        output = self._run("rescan-folder", "--folder-id", folder_id, "--library", str(self.library_path))
+        self.assertIn("Rescanned folder", output)
+
+        library = load_library(self.library_path)
+        self.assertEqual(len(library.catalog.tracks), 1)
+
+    def test_rescan_folder_unknown_id_errors(self) -> None:
+        self._run("add-folder", "--path", str(self.music_dir), "--library", str(self.library_path))
+        with self.assertRaises(SystemExit):
+            main(["rescan-folder", "--folder-id", "missing-id", "--library", str(self.library_path)])
+
 
 class NeedsSettingsTests(unittest.TestCase):
     """Pins `_needs_settings`'s branch behavior so it can be safely refactored
@@ -138,7 +155,7 @@ class NeedsSettingsTests(unittest.TestCase):
         self.assertTrue(_needs_settings(self._args("play")))
 
     def test_library_commands_need_settings_only_without_explicit_library(self) -> None:
-        for command in ("add-folder", "list-folders", "remove-folder"):
+        for command in ("add-folder", "list-folders", "remove-folder", "rescan-folder"):
             self.assertTrue(_needs_settings(self._args(command, library=None)))
             self.assertFalse(_needs_settings(self._args(command, library=Path("lib.json"))))
 

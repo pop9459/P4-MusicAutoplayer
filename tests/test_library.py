@@ -2,10 +2,12 @@
 and background scan progress."""
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from src.library import (
     ALL_TRACKS_FOLDER_ID,
@@ -20,8 +22,10 @@ from src.library import (
     migrate_settings_to_library,
     new_library,
     remove_folder,
+    rescan_folder,
     save_library,
     start_add_folder_task,
+    start_rescan_folder_task,
     tracks_for_folder,
 )
 from src.settings import Settings
@@ -227,6 +231,143 @@ class MigrationTests(unittest.TestCase):
             # library.json itself must have been written.
             self.assertTrue(settings.library_path.exists())
             self.assertFalse(library_needs_migration(settings))
+
+
+class RescanFolderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def test_rescan_refreshes_duration_for_existing_tracks(self) -> None:
+        folder_path = self.root / "music_a"
+        _make_audio_file(folder_path / "Artist - Song.mp3")
+        library, folder, _ = add_folder(new_library(), folder_path)
+        original_track = library.catalog.tracks[0]
+        self.assertIsNone(original_track.duration)
+
+        refreshed_track = replace(original_track, duration=180.0)
+        with mock.patch("src.library.scan_library_with_progress", return_value=[refreshed_track]):
+            new_lib, track_count = rescan_folder(library, folder.id)
+
+        self.assertEqual(track_count, 1)
+        self.assertEqual(new_lib.catalog.tracks[0].duration, 180.0)
+
+    def test_rescan_preserves_disabled_flag(self) -> None:
+        folder_path = self.root / "music_a"
+        _make_audio_file(folder_path / "Artist - Song.mp3")
+        library, folder, _ = add_folder(new_library(), folder_path)
+        original_track = library.catalog.tracks[0]
+        disabled_track = replace(original_track, enabled=False)
+        library = Library(
+            version=library.version,
+            folders=library.folders,
+            catalog=build_catalog([disabled_track]),
+        )
+
+        refreshed_track = replace(original_track, duration=200.0, enabled=True)
+        with mock.patch("src.library.scan_library_with_progress", return_value=[refreshed_track]):
+            new_lib, _ = rescan_folder(library, folder.id)
+
+        self.assertFalse(new_lib.catalog.tracks[0].enabled)
+        self.assertEqual(new_lib.catalog.tracks[0].duration, 200.0)
+
+    def test_rescan_drops_removed_files_and_adds_new_ones(self) -> None:
+        folder_path = self.root / "music_a"
+        _make_audio_file(folder_path / "Artist - Song.mp3")
+        library, folder, _ = add_folder(new_library(), folder_path)
+
+        new_track = TrackRecord(
+            id="new-track",
+            path=str(folder_path / "New - Track.mp3"),
+            title="Track",
+            folder_id=folder.id,
+        )
+        with mock.patch("src.library.scan_library_with_progress", return_value=[new_track]):
+            new_lib, track_count = rescan_folder(library, folder.id)
+
+        self.assertEqual(track_count, 1)
+        self.assertEqual([t.id for t in new_lib.catalog.tracks], ["new-track"])
+
+    def test_rescan_keeps_other_folders_untouched(self) -> None:
+        folder_a_path = self.root / "music_a"
+        _make_audio_file(folder_a_path / "ArtistA - SongA.mp3")
+        library, folder_a, _ = add_folder(new_library(), folder_a_path)
+
+        folder_b_path = self.root / "music_b"
+        _make_audio_file(folder_b_path / "ArtistB - SongB.mp3")
+        library, folder_b, _ = add_folder(library, folder_b_path)
+        original_track_b = next(t for t in library.catalog.tracks if t.folder_id == folder_b.id)
+
+        refreshed_track_a = replace(
+            next(t for t in library.catalog.tracks if t.folder_id == folder_a.id), duration=120.0
+        )
+        with mock.patch("src.library.scan_library_with_progress", return_value=[refreshed_track_a]):
+            new_lib, _ = rescan_folder(library, folder_a.id)
+
+        self.assertEqual(len(new_lib.catalog.tracks), 2)
+        untouched = next(t for t in new_lib.catalog.tracks if t.folder_id == folder_b.id)
+        self.assertEqual(untouched.id, original_track_b.id)
+        self.assertIsNone(untouched.duration)
+
+    def test_rescan_unknown_folder_id_raises(self) -> None:
+        with self.assertRaises(KeyError):
+            rescan_folder(new_library(), "missing-id")
+
+    def test_rescan_missing_path_raises(self) -> None:
+        folder_path = self.root / "music_a"
+        _make_audio_file(folder_path / "Artist - Song.mp3")
+        library, folder, _ = add_folder(new_library(), folder_path)
+        shutil.rmtree(folder_path)
+
+        with self.assertRaises(FileNotFoundError):
+            rescan_folder(library, folder.id)
+
+    def test_progress_callback_is_forwarded(self) -> None:
+        folder_path = self.root / "music_a"
+        _make_audio_file(folder_path / "Artist - Song.mp3")
+        library, folder, _ = add_folder(new_library(), folder_path)
+        original_track = library.catalog.tracks[0]
+
+        def _fake_scan(path, *, folder_id, progress_callback=None):
+            if progress_callback is not None:
+                progress_callback(1, 1)
+            return [original_track]
+
+        calls: list[tuple[int, int]] = []
+        with mock.patch("src.library.scan_library_with_progress", side_effect=_fake_scan):
+            rescan_folder(library, folder.id, progress_callback=lambda s, t: calls.append((s, t)))
+
+        self.assertEqual(calls, [(1, 1)])
+
+
+class RescanTaskTests(unittest.TestCase):
+    def test_start_rescan_folder_task_completes_with_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            folder_path = Path(tmp) / "music"
+            _make_audio_file(folder_path / "Artist - Song.mp3")
+            library, folder, _ = add_folder(new_library(), folder_path)
+
+            task = start_rescan_folder_task(library, folder.id)
+            task.done.wait(timeout=5)
+
+            self.assertTrue(task.done.is_set())
+            self.assertEqual(task.error, [])
+            self.assertEqual(len(task.result), 1)
+            new_lib, track_count = task.result[0]
+            self.assertEqual(track_count, 1)
+            self.assertEqual(len(new_lib.catalog.tracks), 1)
+
+    def test_start_rescan_folder_task_records_error_for_unknown_folder(self) -> None:
+        task = start_rescan_folder_task(new_library(), "missing-id")
+        task.done.wait(timeout=5)
+
+        self.assertTrue(task.done.is_set())
+        self.assertEqual(task.result, [])
+        self.assertEqual(len(task.error), 1)
+        self.assertIsInstance(task.error[0], KeyError)
 
 
 class ScanTaskTests(unittest.TestCase):

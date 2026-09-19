@@ -23,12 +23,14 @@ from .cover_art import (
 )
 from .folder_panel import FolderPanel
 from .library import (
+    ALL_TRACKS_FOLDER_ID,
     Library,
     ScanTask,
     find_folder_by_path,
     load_library,
     save_library,
     start_add_folder_task,
+    start_rescan_folder_task,
 )
 from .mpris_service import MprisService, start_mpris_service
 from .mpv_backend import MpvBackend, MpvUnavailableError
@@ -133,6 +135,9 @@ class Player3Column:
         self._scan_task: ScanTask | None = None
         self._adding_folder = False
         self._search_mode = False
+
+        self._rescan_task: ScanTask | None = None
+        self._rescan_folder_id: str | None = None
 
         self._bpm_task: BpmTask | None = None
         self._bpm_applied_since_save = 0
@@ -296,7 +301,7 @@ class Player3Column:
                     self.player_bar.set_status("Stopped.")
 
         track = self.engine.current_track if self.engine else None
-        self._mpris_service.state.update(
+        self._mpris_service.update_state(
             playing=bool(self.engine) and not self.player_bar.paused,
             has_track=track is not None,
             title=track.title if track else "",
@@ -447,6 +452,8 @@ class Player3Column:
             self._begin_add_folder_prompt()
         elif key in (ord("b"), ord("B")):
             self._toggle_bpm_analysis()
+        elif key in (ord("u"), ord("U")):
+            self._begin_rescan_folder()
 
         return True
 
@@ -488,6 +495,9 @@ class Player3Column:
             # thread is still producing for the old one.
             self.folder_panel.status_message = "Tempo analysis in progress (B to stop)."
             return
+        if self._rescan_task is not None:
+            self.folder_panel.status_message = "Rescan in progress."
+            return
         self._adding_folder = True
 
     def _begin_add_folder_scan(self, raw_path: str) -> None:
@@ -504,6 +514,27 @@ class Player3Column:
         self.folder_panel.status_message = "Scanning: 0/0"
         self._scan_task = start_add_folder_task(self.library, path)
 
+    def _begin_rescan_folder(self) -> None:
+        """Re-scan the selected tracked folder to refresh metadata (e.g.
+        duration) for files scanned before that field existed, or that
+        changed on disk since."""
+        entry = self.folder_panel.selected_entry
+        if entry is None or entry.id == ALL_TRACKS_FOLDER_ID:
+            self.folder_panel.status_message = "Select a folder to rescan."
+            return
+        if self._scan_task is not None:
+            self.folder_panel.status_message = "Scan in progress."
+            return
+        if self._bpm_task is not None:
+            self.folder_panel.status_message = "Tempo analysis in progress (B to stop)."
+            return
+        if self._rescan_task is not None:
+            self.folder_panel.status_message = "Rescan already in progress."
+            return
+        self.folder_panel.status_message = "Rescanning: 0/0"
+        self._rescan_folder_id = entry.id
+        self._rescan_task = start_rescan_folder_task(self.library, entry.id)
+
     # How many newly detected tempi to accumulate before writing the library
     # back out. Saving costs ~35ms on a 2600-track library, which is well
     # inside one 200ms render tick, but a run lasting tens of minutes
@@ -518,6 +549,9 @@ class Player3Column:
             return
         if self._scan_task is not None:
             self.folder_panel.status_message = "Scan in progress."
+            return
+        if self._rescan_task is not None:
+            self.folder_panel.status_message = "Rescan in progress."
             return
 
         pending = tracks_needing_bpm(self.library.catalog.tracks)
@@ -642,6 +676,43 @@ class Player3Column:
         )
         self.folder_panel.status_message = message
 
+    def _poll_rescan_task(self) -> None:
+        """Check on a running folder rescan; apply its result once done."""
+        if self._rescan_task is None:
+            return
+
+        if not self._rescan_task.done.is_set():
+            scanned, total = self._rescan_task.progress()
+            self.folder_panel.status_message = f"Rescanning: {scanned}/{total}"
+            return
+
+        task = self._rescan_task
+        folder_id = self._rescan_folder_id
+        self._rescan_task = None
+        self._rescan_folder_id = None
+
+        if task.error:
+            self.folder_panel.status_message = f"Rescan failed: {task.error[0]}"
+            return
+
+        new_library, track_count = task.result[0]
+        self.library = new_library
+        try:
+            save_library(self.library, self.settings.library_path)
+        except OSError as error:
+            self.folder_panel.status_message = f"Save failed: {error}"
+
+        self.folder_panel.load_from_library(self.library)
+        for index, entry in enumerate(self.folder_panel.entries):
+            if entry.id == folder_id:
+                self.folder_panel.select_folder(index)
+                break
+        if self.folder_panel.selected_entry:
+            self.songs_panel.load_songs_from_library(
+                self.library, self.folder_panel.selected_entry
+            )
+        self.folder_panel.status_message = f"Rescanned ({track_count} tracks)."
+
     def _apply_settings(self) -> None:
         """Persist the edited settings, then live-reapply them."""
         new_settings = self.settings_panel.to_settings()
@@ -758,6 +829,7 @@ class Player3Column:
             # Render all panels
             self._refresh_progress()
             self._poll_scan_task()
+            self._poll_rescan_task()
             self._poll_bpm_task()
             self._poll_queue_task()
             self._poll_mpris_task()
@@ -1068,7 +1140,7 @@ class Player3Column:
             stdscr.addnstr(
                 height - 1,
                 col,
-                "[A] Add folder  [B] Analyze tempo".ljust(width - 1)[: width - 1],
+                "[A] Add folder  [B] Analyze tempo  [U] Rescan".ljust(width - 1)[: width - 1],
                 width - 1,
                 curses.A_DIM,
             )
