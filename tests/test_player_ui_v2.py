@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.folder_panel import FolderPanel
-from src.library import ALL_TRACKS_FOLDER_ID, Library, LibraryFolder
+from src.library import ALL_TRACKS_FOLDER_ID, Library, LibraryFolder, ScanTask
 from src.mpv_backend import MpvBackend
 from src.player import PlayerEngine
 from src.player_bar import PlayerBar
@@ -1241,3 +1241,79 @@ class BackgroundBpmAnalysisTests(unittest.TestCase):
 
         self.assertTrue(player.handle_folder_input(ord(" ")))
         self.assertFalse(player.handle_folder_input(ord("q")))
+
+
+class RescanFolderUiTests(unittest.TestCase):
+    """Pressing U re-scans the selected tracked folder without a path
+    prompt, by driving the same add_folder/start_add_folder_task scan the A
+    key uses -- add_folder rescans (refreshing metadata like duration)
+    rather than no-op'ing when given an already-tracked path."""
+
+    def setUp(self) -> None:
+        self.catalog = load_catalog(Path("testTracks/catalog.json"))
+        self.library = _library_from_catalog(self.catalog)
+        self.settings = load_settings()
+        self.backend = MagicMock(spec=MpvBackend)
+
+    def _player(self) -> Player3Column:
+        return Player3Column(self.library, self.settings, self.backend)
+
+    def test_rescan_refused_on_all_tracks_entry(self) -> None:
+        player = self._player()
+        self.assertEqual(player.folder_panel.selected_entry.id, ALL_TRACKS_FOLDER_ID)
+
+        with patch("src.player_ui_v2.start_add_folder_task") as start:
+            player.handle_folder_input(ord("u"))
+
+        start.assert_not_called()
+        self.assertIn("Select a folder to rescan", player.folder_panel.status_message)
+
+    def test_rescan_starts_for_selected_folder(self) -> None:
+        player = self._player()
+        player.folder_panel.select_folder(1)  # the real "testtracks" folder
+        folder_path = player.folder_panel.selected_entry.path
+
+        with patch("src.player_ui_v2.start_add_folder_task") as start:
+            player.handle_folder_input(ord("u"))
+
+        start.assert_called_once_with(player.library, Path(folder_path))
+        self.assertIn("Scanning: 0/0", player.folder_panel.status_message)
+        self.assertIsNotNone(player._scan_task)
+
+    def test_rescan_refused_while_scan_in_progress(self) -> None:
+        player = self._player()
+        player.folder_panel.select_folder(1)
+        player._scan_task = MagicMock()
+
+        with patch("src.player_ui_v2.start_add_folder_task") as start:
+            player.handle_folder_input(ord("u"))
+
+        start.assert_not_called()
+        self.assertIn("Scan already in progress", player.folder_panel.status_message)
+
+    def test_rescan_refused_while_bpm_analysis_runs(self) -> None:
+        player = self._player()
+        player.folder_panel.select_folder(1)
+        player._bpm_task = MagicMock()
+
+        with patch("src.player_ui_v2.start_add_folder_task") as start:
+            player.handle_folder_input(ord("u"))
+
+        start.assert_not_called()
+        self.assertIn("Tempo analysis in progress", player.folder_panel.status_message)
+
+    def test_poll_scan_task_reports_rescanned_when_not_newly_added(self) -> None:
+        player = self._player()
+        player.folder_panel.select_folder(1)
+        folder = next(f for f in player.library.folders if f.id == "testtracks")
+
+        task = ScanTask(thread=None)
+        task.result.append((player.library, folder, False))
+        task.done.set()
+        player._scan_task = task
+
+        with patch("src.player_ui_v2.save_library"):
+            player._poll_scan_task()
+
+        self.assertIsNone(player._scan_task)
+        self.assertIn(f"Rescanned {folder.display_name}", player.folder_panel.status_message)

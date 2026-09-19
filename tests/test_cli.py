@@ -85,13 +85,16 @@ class AddFolderCliTests(unittest.TestCase):
         list_output = self._run("list-folders", "--library", str(self.library_path))
         self.assertIn("1 folders, 1 tracks total.", list_output)
 
-    def test_add_folder_twice_is_a_no_op(self) -> None:
+    def test_add_folder_twice_rescans_existing_folder(self) -> None:
         self._run("add-folder", "--path", str(self.music_dir), "--library", str(self.library_path))
         second_output = self._run("add-folder", "--path", str(self.music_dir), "--library", str(self.library_path))
-        self.assertIn("already tracked", second_output)
+        self.assertIn("Rescanned folder", second_output)
 
         list_output = self._run("list-folders", "--library", str(self.library_path))
         self.assertIn("1 folders,", list_output)
+
+        from src.library import load_library
+        self.assertEqual(len(load_library(self.library_path).catalog.tracks), 1)
 
     def test_remove_folder_drops_its_tracks(self) -> None:
         self._run("add-folder", "--path", str(self.music_dir), "--library", str(self.library_path))
@@ -114,6 +117,23 @@ class AddFolderCliTests(unittest.TestCase):
         self._run("add-folder", "--path", str(self.music_dir), "--library", str(self.library_path))
         after = set(self.music_dir.iterdir())
         self.assertEqual(before, after)
+
+    def test_rescan_folder_reports_summary_and_keeps_track_count(self) -> None:
+        from src.library import load_library
+
+        self._run("add-folder", "--path", str(self.music_dir), "--library", str(self.library_path))
+        folder_id = load_library(self.library_path).folders[0].id
+
+        output = self._run("rescan-folder", "--folder-id", folder_id, "--library", str(self.library_path))
+        self.assertIn("Rescanned folder", output)
+
+        library = load_library(self.library_path)
+        self.assertEqual(len(library.catalog.tracks), 1)
+
+    def test_rescan_folder_unknown_id_errors(self) -> None:
+        self._run("add-folder", "--path", str(self.music_dir), "--library", str(self.library_path))
+        with self.assertRaises(SystemExit):
+            main(["rescan-folder", "--folder-id", "missing-id", "--library", str(self.library_path)])
 
 
 class NeedsSettingsTests(unittest.TestCase):
@@ -138,7 +158,7 @@ class NeedsSettingsTests(unittest.TestCase):
         self.assertTrue(_needs_settings(self._args("play")))
 
     def test_library_commands_need_settings_only_without_explicit_library(self) -> None:
-        for command in ("add-folder", "list-folders", "remove-folder"):
+        for command in ("add-folder", "list-folders", "remove-folder", "rescan-folder"):
             self.assertTrue(_needs_settings(self._args(command, library=None)))
             self.assertFalse(_needs_settings(self._args(command, library=Path("lib.json"))))
 

@@ -23,9 +23,9 @@ from .cover_art import (
 )
 from .folder_panel import FolderPanel
 from .library import (
+    ALL_TRACKS_FOLDER_ID,
     Library,
     ScanTask,
-    find_folder_by_path,
     load_library,
     save_library,
     start_add_folder_task,
@@ -296,7 +296,7 @@ class Player3Column:
                     self.player_bar.set_status("Stopped.")
 
         track = self.engine.current_track if self.engine else None
-        self._mpris_service.state.update(
+        self._mpris_service.update_state(
             playing=bool(self.engine) and not self.player_bar.paused,
             has_track=track is not None,
             title=track.title if track else "",
@@ -447,6 +447,8 @@ class Player3Column:
             self._begin_add_folder_prompt()
         elif key in (ord("b"), ord("B")):
             self._toggle_bpm_analysis()
+        elif key in (ord("u"), ord("U")):
+            self._begin_rescan_folder()
 
         return True
 
@@ -495,14 +497,27 @@ class Player3Column:
         if not raw_path:
             return
         path = Path(raw_path).expanduser()
-        existing = find_folder_by_path(self.library, path)
-        if existing is not None:
-            self.folder_panel.status_message = (
-                f"Already tracked: {existing.display_name}"
-            )
-            return
         self.folder_panel.status_message = "Scanning: 0/0"
         self._scan_task = start_add_folder_task(self.library, path)
+
+    def _begin_rescan_folder(self) -> None:
+        """Re-scan the selected tracked folder without a path prompt --
+        its path is already known, so this just drives the same
+        add_folder/start_add_folder_task scan as the A key, which rescans
+        (refreshing metadata like duration) rather than no-op'ing when the
+        path is already tracked."""
+        entry = self.folder_panel.selected_entry
+        if entry is None or entry.id == ALL_TRACKS_FOLDER_ID:
+            self.folder_panel.status_message = "Select a folder to rescan."
+            return
+        if self._scan_task is not None:
+            self.folder_panel.status_message = "Scan already in progress."
+            return
+        if self._bpm_task is not None:
+            self.folder_panel.status_message = "Tempo analysis in progress (B to stop)."
+            return
+        self.folder_panel.status_message = "Scanning: 0/0"
+        self._scan_task = start_add_folder_task(self.library, Path(entry.path))
 
     # How many newly detected tempi to accumulate before writing the library
     # back out. Saving costs ~35ms on a 2600-track library, which is well
@@ -636,9 +651,9 @@ class Player3Column:
                 self.library, self.folder_panel.selected_entry
             )
         message = (
-            "Already tracked"
-            if not was_added
-            else f"Added {folder.display_name} ({folder.track_count} tracks)."
+            f"Added {folder.display_name} ({folder.track_count} tracks)."
+            if was_added
+            else f"Rescanned {folder.display_name} ({folder.track_count} tracks)."
         )
         self.folder_panel.status_message = message
 
@@ -1068,7 +1083,7 @@ class Player3Column:
             stdscr.addnstr(
                 height - 1,
                 col,
-                "[A] Add folder  [B] Analyze tempo".ljust(width - 1)[: width - 1],
+                "[A] Add folder  [B] Analyze tempo  [U] Rescan".ljust(width - 1)[: width - 1],
                 width - 1,
                 curses.A_DIM,
             )

@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import base64
 import fcntl
+import hashlib
 import io
+import os
 import struct
 import termios
 from pathlib import Path
@@ -147,6 +149,54 @@ def normalize_to_png(art_bytes: bytes) -> bytes | None:
         return buffer.getvalue()
     except Exception:
         return None
+
+
+def default_art_cache_dir() -> Path:
+    """XDG-cache-dir-conventional location for `cache_art_file`'s output.
+    Not the same boundary as this module's "never persist art" rule above
+    -- that's specifically about not bloating `data/library.json`/the
+    catalog. This is a small, regenerable OS-standard cache used only for
+    desktop MPRIS integration (a `file://` URL for `mpris:artUrl`), safe
+    to delete at any time without losing anything not trivially
+    re-derivable from the track file itself."""
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / "p4-musicautoplayer" / "art"
+
+
+def cache_art_file(track_id: str, path: str | Path, cache_dir: Path) -> Path | None:
+    """Extract+normalize `path`'s embedded cover art (as `extract_cover_art`/
+    `normalize_to_png` above) and write it as a PNG file under `cache_dir`,
+    returning that file's path -- or None if the track has no usable
+    embedded art. Unlike the rest of this module, this writes to disk:
+    MPRIS's `mpris:artUrl` metadata key needs a real file://-able path, not
+    in-memory bytes.
+
+    The filename is a deterministic hash of `track_id`, so a repeat call
+    for the same track -- including across process restarts -- finds the
+    existing file and skips extraction entirely, without needing any
+    separate in-memory cache here.
+
+    Same fail-soft posture as the rest of this module: returns None rather
+    than raising on any failure (no art, undecodable art, cache dir/file
+    not writable, etc.)."""
+    cache_dir = Path(cache_dir)
+    cached_path = cache_dir / (hashlib.sha256(track_id.encode("utf-8")).hexdigest() + ".png")
+    if cached_path.exists():
+        return cached_path
+
+    art = extract_cover_art(path)
+    if art is None:
+        return None
+    png_bytes = normalize_to_png(art[0])
+    if png_bytes is None:
+        return None
+
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached_path.write_bytes(png_bytes)
+    except OSError:
+        return None
+    return cached_path
 
 
 def build_kitty_transmit_chunks(png_bytes: bytes, image_id: int, cols: int, rows: int) -> list[bytes]:

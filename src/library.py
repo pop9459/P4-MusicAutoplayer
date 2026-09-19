@@ -118,9 +118,11 @@ def add_folder(
     existing catalog, and rebuild the global feature space over all tracks.
 
     Returns (library, folder, was_added). If the resolved path already
-    matches a tracked folder, returns the existing folder unchanged with
-    was_added=False (a no-op, not an error) so callers can show a
-    "already tracked" message instead of duplicating it.
+    matches a tracked folder, this rescans it instead (see rescan_folder) --
+    refreshing metadata such as duration for files still on disk -- and
+    returns was_added=False so callers can distinguish "added a new folder"
+    from "refreshed an existing one" for their own messaging, even though
+    both branches now mutate and return a real library.
     """
     resolved = Path(path).expanduser().resolve()
     if not resolved.exists():
@@ -130,7 +132,9 @@ def add_folder(
 
     existing = find_folder_by_path(library, resolved)
     if existing is not None:
-        return library, existing, False
+        new_library_value, _ = rescan_folder(library, existing.id, progress_callback=progress_callback)
+        updated_folder = next(f for f in new_library_value.folders if f.id == existing.id)
+        return new_library_value, updated_folder, False
 
     folder_id = _folder_id_from_path(resolved)
     new_tracks = scan_library_with_progress(
@@ -154,6 +158,58 @@ def add_folder(
         catalog=new_catalog,
     )
     return new_library_value, folder, True
+
+
+def rescan_folder(
+    library: Library,
+    folder_id: str,
+    *,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> tuple[Library, int]:
+    """Re-scan an already-tracked folder, refreshing metadata for files still
+    on disk (e.g. duration for tracks scanned before that field existed).
+
+    Drops tracks for files no longer in the folder and picks up new ones,
+    same as a fresh add_folder scan would. Each surviving track's `enabled`
+    flag is carried over from the existing record, since a fresh scan
+    otherwise defaults to enabled=True and would silently re-enable tracks
+    the user disabled.
+    """
+    folder = next((f for f in library.folders if f.id == folder_id), None)
+    if folder is None:
+        raise KeyError(f"Unknown folder id: {folder_id}")
+
+    resolved = Path(folder.path)
+    if not resolved.exists():
+        raise FileNotFoundError(f"Folder no longer exists: {resolved}")
+
+    fresh_tracks = scan_library_with_progress(
+        resolved, folder_id=folder_id, progress_callback=progress_callback
+    )
+
+    previously_enabled = {
+        track.id: track.enabled
+        for track in library.catalog.tracks
+        if track.folder_id == folder_id
+    }
+    for track in fresh_tracks:
+        if track.id in previously_enabled:
+            track.enabled = previously_enabled[track.id]
+
+    other_tracks = [track for track in library.catalog.tracks if track.folder_id != folder_id]
+    new_catalog = build_catalog(other_tracks + fresh_tracks)
+
+    updated_folder = LibraryFolder(
+        id=folder.id,
+        path=folder.path,
+        display_name=folder.display_name,
+        added_at=folder.added_at,
+        last_scanned_at=_now_iso(),
+        track_count=len(fresh_tracks),
+    )
+    new_folders = [updated_folder if f.id == folder_id else f for f in library.folders]
+    new_library_value = Library(version=LIBRARY_VERSION, folders=new_folders, catalog=new_catalog)
+    return new_library_value, len(fresh_tracks)
 
 
 def remove_folder(library: Library, folder_id: str) -> Library:
@@ -283,6 +339,29 @@ def start_add_folder_task(library: Library, path: str | Path) -> ScanTask:
             outcome = add_folder(library, path, progress_callback=_on_progress)
             task.result.append(outcome)
         except (FileNotFoundError, NotADirectoryError, OSError) as error:
+            task.error.append(error)
+        finally:
+            task.done.set()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    task.thread = thread
+    thread.start()
+    return task
+
+
+def start_rescan_folder_task(library: Library, folder_id: str) -> ScanTask:
+    task = ScanTask(thread=None)
+
+    def _on_progress(scanned: int, total: int) -> None:
+        with task.lock:
+            task._progress[0] = scanned
+            task._progress[1] = total
+
+    def _run() -> None:
+        try:
+            outcome = rescan_folder(library, folder_id, progress_callback=_on_progress)
+            task.result.append(outcome)
+        except (KeyError, FileNotFoundError, OSError) as error:
             task.error.append(error)
         finally:
             task.done.set()
