@@ -34,10 +34,10 @@ from .library import (
 )
 from .mpris_service import MprisService, start_mpris_service
 from .mpv_backend import MpvBackend, MpvUnavailableError
-from .player import PlayerEngine, QueueTask, filter_enabled_tracks, start_queue_task
+from .player import PlayerEngine, QueueTask, start_queue_task
 from .player_bar import PlayerBar, _format_time
 from .queue_panel import QueuePanel
-from .settings import DEFAULT_SETTINGS_PATH, Settings, load_settings, save_settings
+from .settings import DEFAULT_SETTINGS_PATH, Settings, save_settings
 from .settings_panel import FIELDS as SETTINGS_FIELDS
 from .settings_panel import SettingsPanel
 from .songs_panel import SongsPanel

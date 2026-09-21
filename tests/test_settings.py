@@ -215,20 +215,3 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertEqual(reloaded.music_directory, settings.music_directory)
         self.assertEqual(reloaded.music_folders, settings.music_folders)
 
-    def test_with_music_directory_creates_new_settings(self) -> None:
-        self.settings_path.write_text(json.dumps({
-            "version": 1,
-            "catalog_path": "catalog.json",
-            "music_directory": "music",
-            "top_k": 1,
-            "randomness": 0.0,
-            "queue_length": 1,
-        }), encoding="utf-8")
-
-        settings = load_settings(self.settings_path)
-        new_path = self.root / "new_music"
-        updated = settings.with_music_directory(new_path)
-
-        self.assertEqual(updated.music_directory, new_path)
-        self.assertEqual(updated.music_folders, (new_path,))
-        self.assertEqual(updated.top_k, settings.top_k)

@@ -90,17 +90,6 @@ class SettingsPanel:
         self.editing_text = False
         self.text_buffer = ""
 
-    def has_changes(self) -> bool:
-        if self.original is None:
-            return False
-        return (
-            self.top_k != self.original.top_k
-            or self.randomness != self.original.randomness
-            or self.queue_length != self.original.queue_length
-            or self.normalize_volume != self.original.normalize_volume
-            or self.library_path != self.original.library_path
-        )
-
     def to_settings(self) -> Settings:
         if self.original is None:
             raise ValueError("SettingsPanel has no original Settings loaded")

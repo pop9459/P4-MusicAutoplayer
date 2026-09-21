@@ -142,14 +142,6 @@ class SettingsPanelSaveTests(unittest.TestCase):
         self.panel = SettingsPanel()
         self.panel.load_from_settings(DEFAULT_SETTINGS)
 
-    def test_has_changes_false_initially(self) -> None:
-        self.assertFalse(self.panel.has_changes())
-
-    def test_has_changes_true_after_edit(self) -> None:
-        self.panel.field_index = FIELDS.index("top_k")
-        self.panel.increment()
-        self.assertTrue(self.panel.has_changes())
-
     def test_to_settings_reflects_edits_and_preserves_other_fields(self) -> None:
         self.panel.field_index = FIELDS.index("top_k")
         self.panel.increment()
@@ -162,11 +154,6 @@ class SettingsPanelSaveTests(unittest.TestCase):
         # is the source of truth for folders).
         self.assertIsNone(updated.music_folders)
         self.assertIsNone(updated.music_directory)
-
-    def test_has_changes_true_after_normalize_volume_toggle(self) -> None:
-        self.panel.field_index = FIELDS.index("normalize_volume")
-        self.panel.increment()
-        self.assertTrue(self.panel.has_changes())
 
     def test_to_settings_reflects_normalize_volume_edit(self) -> None:
         self.panel.field_index = FIELDS.index("normalize_volume")

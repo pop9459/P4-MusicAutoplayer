@@ -7,12 +7,7 @@ from .library import (
     save_library,
 )
 from .mpv_backend import MpvBackend, MpvUnavailableError
-from .predictor import (
-    generate_queue,
-    generate_queue_from_json,
-    recommend_next_track,
-    recommend_next_track_from_json,
-)
+from .predictor import generate_queue, recommend_next_track
 from .settings import Settings, load_settings
 from .track_analyzer import (
     Catalog,

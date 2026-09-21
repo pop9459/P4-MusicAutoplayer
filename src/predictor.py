@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import random
 from collections import Counter
-from pathlib import Path
 from typing import Collection, Sequence
 
-from .track_analyzer import Catalog, TrackFeatures, TrackRecord, load_catalog, track_similarity
+from .track_analyzer import Catalog, TrackFeatures, TrackRecord, track_similarity
 
 
 def rank_candidates_by_features(
@@ -162,16 +161,6 @@ def recommend_next_track(
     return _sample_weighted_candidates(ranked_candidates, randomness, rng or random.Random())
 
 
-def recommend_next_track_from_json(
-    catalog_path: str | Path,
-    current_track_id: str,
-    top_k: int = 5,
-    randomness: float = 0.0,
-    rng: random.Random | None = None,
-) -> TrackRecord:
-    catalog = load_catalog(catalog_path)
-    return recommend_next_track(current_track_id, catalog, top_k=top_k, randomness=randomness, rng=rng)
-
 # Fraction of each ranking step's score drawn from similarity to the original
 # seed track rather than to the previously picked track. Chaining purely off
 # the last pick lets small similarity drifts compound step over step, so a
@@ -255,16 +244,3 @@ def generate_queue(
             max_consecutive_same_artist=max_consecutive_same_artist,
         )
     )
-
-
-def generate_queue_from_json(
-    catalog_path: str | Path,
-    current_track_id: str,
-    length: int = 10,
-    top_k: int = 5,
-    randomness: float = 0.0,
-    rng: random.Random | None = None,
-    max_consecutive_same_artist: int | None = 3,
-) -> list[TrackRecord]:
-    catalog = load_catalog(catalog_path)
-    return generate_queue(current_track_id, catalog, length, top_k, randomness, rng, max_consecutive_same_artist)

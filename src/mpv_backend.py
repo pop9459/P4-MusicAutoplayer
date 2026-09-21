@@ -145,9 +145,6 @@ class MpvBackend:
             sleep(0.05)
         return None
 
-    def pause(self) -> None:
-        self._send(["set_property", "pause", True])
-
     def resume(self) -> None:
         self._send(["set_property", "pause", False])
 

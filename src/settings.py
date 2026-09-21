@@ -27,15 +27,6 @@ class Settings:
     music_directory: Path | None = None
     music_folders: tuple[Path, ...] | None = None
 
-    def with_music_directory(self, new_directory: Path) -> Settings:
-        """Return a new Settings with updated music_directory and folders.
-
-        Retained for the legacy v1 TUI (src/tui_player.py), which still
-        edits a single music_directory in place.
-        """
-        from dataclasses import replace
-        return replace(self, music_directory=new_directory, music_folders=(new_directory,))
-
 
 def _require_string(payload: dict[str, Any], name: str) -> str:
     value = payload.get(name)

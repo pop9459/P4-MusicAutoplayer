@@ -347,26 +347,3 @@ def start_add_folder_task(library: Library, path: str | Path) -> ScanTask:
     task.thread = thread
     thread.start()
     return task
-
-
-def start_rescan_folder_task(library: Library, folder_id: str) -> ScanTask:
-    task = ScanTask(thread=None)
-
-    def _on_progress(scanned: int, total: int) -> None:
-        with task.lock:
-            task._progress[0] = scanned
-            task._progress[1] = total
-
-    def _run() -> None:
-        try:
-            outcome = rescan_folder(library, folder_id, progress_callback=_on_progress)
-            task.result.append(outcome)
-        except (KeyError, FileNotFoundError, OSError) as error:
-            task.error.append(error)
-        finally:
-            task.done.set()
-
-    thread = threading.Thread(target=_run, daemon=True)
-    task.thread = thread
-    thread.start()
-    return task

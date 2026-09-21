@@ -25,7 +25,6 @@ from src.library import (
     rescan_folder,
     save_library,
     start_add_folder_task,
-    start_rescan_folder_task,
     tracks_for_folder,
 )
 from src.settings import Settings
@@ -359,34 +358,6 @@ class RescanFolderTests(unittest.TestCase):
             rescan_folder(library, folder.id, progress_callback=lambda s, t: calls.append((s, t)))
 
         self.assertEqual(calls, [(1, 1)])
-
-
-class RescanTaskTests(unittest.TestCase):
-    def test_start_rescan_folder_task_completes_with_result(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            folder_path = Path(tmp) / "music"
-            _make_audio_file(folder_path / "Artist - Song.mp3")
-            library, folder, _ = add_folder(new_library(), folder_path)
-
-            task = start_rescan_folder_task(library, folder.id)
-            task.done.wait(timeout=5)
-
-            self.assertTrue(task.done.is_set())
-            self.assertEqual(task.error, [])
-            self.assertEqual(len(task.result), 1)
-            new_lib, track_count = task.result[0]
-            self.assertEqual(track_count, 1)
-            self.assertEqual(len(new_lib.catalog.tracks), 1)
-
-    def test_start_rescan_folder_task_records_error_for_unknown_folder(self) -> None:
-        task = start_rescan_folder_task(new_library(), "missing-id")
-        task.done.wait(timeout=5)
-
-        self.assertTrue(task.done.is_set())
-        self.assertEqual(task.result, [])
-        self.assertEqual(len(task.error), 1)
-        self.assertIsInstance(task.error[0], KeyError)
-
 
 class ScanTaskTests(unittest.TestCase):
     def test_start_add_folder_task_completes_with_result(self) -> None:
