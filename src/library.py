@@ -166,10 +166,18 @@ def rescan_folder(
     on disk (e.g. duration for tracks scanned before that field existed).
 
     Drops tracks for files no longer in the folder and picks up new ones,
-    same as a fresh add_folder scan would. Each surviving track's `enabled`
-    flag is carried over from the existing record, since a fresh scan
-    otherwise defaults to enabled=True and would silently re-enable tracks
-    the user disabled.
+    same as a fresh add_folder scan would.
+
+    Two fields survive the rescan, because a fresh scan cannot recover them
+    from the file and would silently destroy them:
+
+    - `enabled`, which a scan defaults to True, silently re-enabling tracks
+      the user had disabled.
+    - `bpm`, when the file itself carries no BPM tag. That is the common case
+      -- `analyze-bpm` detects tempo from the audio and stores it only in the
+      library, so a rescan that took the scan's result verbatim would throw
+      away an entire analysis run (tens of minutes) for the rescanned folder.
+      A real tag still wins: if the file now has one, the fresh value is used.
     """
     folder = next((f for f in library.folders if f.id == folder_id), None)
     if folder is None:
@@ -183,14 +191,18 @@ def rescan_folder(
         resolved, folder_id=folder_id, progress_callback=progress_callback
     )
 
-    previously_enabled = {
-        track.id: track.enabled
+    previous = {
+        track.id: track
         for track in library.catalog.tracks
         if track.folder_id == folder_id
     }
     for track in fresh_tracks:
-        if track.id in previously_enabled:
-            track.enabled = previously_enabled[track.id]
+        existing = previous.get(track.id)
+        if existing is None:
+            continue
+        track.enabled = existing.enabled
+        if track.bpm is None:
+            track.bpm = existing.bpm
 
     other_tracks = [track for track in library.catalog.tracks if track.folder_id != folder_id]
     new_catalog = build_catalog(other_tracks + fresh_tracks)

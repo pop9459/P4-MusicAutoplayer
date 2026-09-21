@@ -390,3 +390,53 @@ class ScanTaskTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RescanPreservesDerivedDataTests(unittest.TestCase):
+    """A rescan must not destroy what a scan cannot recover from the file.
+
+    `analyze-bpm` detects tempo from the audio and stores it in the library
+    only -- the file keeps no BPM tag -- so a rescan that trusted the scan
+    verbatim discarded a whole analysis run for the rescanned folder.
+    """
+
+    def _library_with_analyzed_bpm(self, tmp: str) -> tuple[Library, str, str]:
+        folder_path = Path(tmp) / "music"
+        _make_audio_file(folder_path / "Artist - Song.mp3")
+        library, folder, _ = add_folder(new_library(), folder_path)
+        track = library.catalog.tracks[0]
+        self.assertIsNone(track.bpm)  # the fixture file carries no tags
+        track.bpm = 128.0
+        track.enabled = False
+        return library, folder.id, track.id
+
+    def test_rescan_keeps_bpm_that_came_from_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            library, folder_id, track_id = self._library_with_analyzed_bpm(tmp)
+
+            rescanned, _ = rescan_folder(library, folder_id)
+
+            track = next(t for t in rescanned.catalog.tracks if t.id == track_id)
+            self.assertEqual(track.bpm, 128.0)
+
+    def test_rescan_still_keeps_the_enabled_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            library, folder_id, track_id = self._library_with_analyzed_bpm(tmp)
+
+            rescanned, _ = rescan_folder(library, folder_id)
+
+            track = next(t for t in rescanned.catalog.tracks if t.id == track_id)
+            self.assertFalse(track.enabled)
+
+    def test_add_folder_on_a_tracked_path_keeps_it_too(self) -> None:
+        # add_folder delegates to rescan_folder for an already-tracked path,
+        # which is also what the TUI's A and U keys both drive.
+        with tempfile.TemporaryDirectory() as tmp:
+            library, folder_id, track_id = self._library_with_analyzed_bpm(tmp)
+            folder_path = next(f.path for f in library.folders if f.id == folder_id)
+
+            rescanned, _, was_added = add_folder(library, folder_path)
+
+            self.assertFalse(was_added)
+            track = next(t for t in rescanned.catalog.tracks if t.id == track_id)
+            self.assertEqual(track.bpm, 128.0)
