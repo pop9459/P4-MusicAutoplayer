@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 import argparse
 
+from src import player_ui_v2
 from src.cli import _needs_settings, main
+from src.library import new_library, save_library
+from src.settings import Settings
 from src.track_analyzer import TrackRecord, build_catalog, save_catalog
 
 
@@ -189,3 +194,58 @@ class NeedsSettingsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlayFlagOverrideTests(unittest.TestCase):
+    """`play` accepts --top-k/--randomness/--length; they must reach the TUI.
+
+    They used to be parsed, defaulted from settings, and then dropped on the
+    floor -- _command_play never read args, so the flags silently did nothing.
+    """
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        root = Path(self.temporary_directory.name)
+        self.settings_path = root / "settings.json"
+        self.settings_path.write_text(
+            json.dumps({
+                "version": 1,
+                "library_path": "library.json",
+                "top_k": 5,
+                "randomness": 0.1,
+                "queue_length": 10,
+            }),
+            encoding="utf-8",
+        )
+        save_library(new_library(), root / "library.json")
+
+    def _run_play(self, *flags: str) -> Settings:
+        received: list[Settings] = []
+
+        def _fake_run(library, settings, settings_path=None):
+            received.append(settings)
+            return 0
+
+        with mock.patch.object(player_ui_v2, "run", _fake_run):
+            main(["--settings", str(self.settings_path), "play", *flags])
+        return received[0]
+
+    def test_flags_override_settings_for_this_run(self) -> None:
+        settings = self._run_play("--top-k", "12", "--randomness", "0.4", "--length", "40")
+
+        self.assertEqual(settings.top_k, 12)
+        self.assertAlmostEqual(settings.randomness, 0.4)
+        self.assertEqual(settings.queue_length, 40)
+
+    def test_settings_are_used_when_no_flag_is_passed(self) -> None:
+        settings = self._run_play()
+
+        self.assertEqual(settings.top_k, 5)
+        self.assertAlmostEqual(settings.randomness, 0.1)
+        self.assertEqual(settings.queue_length, 10)
+
+    def test_override_is_not_written_back_to_settings_json(self) -> None:
+        self._run_play("--top-k", "12")
+
+        self.assertEqual(json.loads(self.settings_path.read_text(encoding="utf-8"))["top_k"], 5)

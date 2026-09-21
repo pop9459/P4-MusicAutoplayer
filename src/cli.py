@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -162,6 +163,15 @@ def _command_queue(args: argparse.Namespace) -> None:
 
 def _command_play(args: argparse.Namespace, settings: Settings) -> None:
     settings_path = args.settings or DEFAULT_SETTINGS_PATH
+    # Explicit flags override settings for this run only -- never written back.
+    # _apply_settings_defaults has already filled each of these from settings
+    # when the flag was absent, so this is a no-op unless one was passed.
+    settings = replace(
+        settings,
+        top_k=args.top_k,
+        randomness=args.randomness,
+        queue_length=args.length,
+    )
     if library_needs_migration(settings):
         library = migrate_settings_to_library(settings, settings_path)
     else:
