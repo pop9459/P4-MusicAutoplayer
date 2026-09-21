@@ -2,9 +2,12 @@
 
 Recommender changes are easy to argue about and hard to judge by ear, so this
 reports the numbers a change should be defended with. Every figure here was
-what settled whether to build GitHub #10 (it said no: sessions were already
-staying put, and anchoring the top-up would have cost a fifth of their
-variety for a 0.002 change in similarity to the seed).
+what settled GitHub #10 (it said no to anchoring the player's incremental
+top-up: sessions were already staying put, and it would have cost a fifth of
+their variety for a 0.002 change in similarity to the seed). Note that
+`generate_queue_steps` -- which builds a queue in one go rather than topping
+one up -- does anchor to the seed, at SEED_ANCHOR_WEIGHT = 0.3; #10 was about
+the top-up path, not that one.
 
 Sessions are driven through `PlayerEngine.advance()` rather than
 `generate_queue`, so the measurements exercise the queue top-up, the artist
