@@ -39,7 +39,8 @@ def rank_candidates_by_features(
     return candidates
 
 
-def _find_track(catalog: Catalog, track_id: str) -> TrackRecord:
+def find_track(catalog: Catalog, track_id: str) -> TrackRecord:
+    """Look up one track by id, or raise ValueError naming the missing id."""
     track = next((item for item in catalog.tracks if item.id == track_id), None)
     if track is None:
         raise ValueError(f"Track not found in catalog: {track_id}")
@@ -107,7 +108,7 @@ def rank_candidates(
     catalog: Catalog,
     excluded_track_ids: Collection[str] = (),
 ) -> list[tuple[TrackRecord, float]]:
-    current_track = _find_track(catalog, current_track_id)
+    current_track = find_track(catalog, current_track_id)
     return rank_candidates_by_features(
         catalog.features_for(current_track),
         catalog,
@@ -190,7 +191,7 @@ def generate_queue_steps(
     if length < 1:
         raise ValueError("Queue length must be at least 1")
 
-    seed_track = _find_track(catalog, current_track_id)
+    seed_track = find_track(catalog, current_track_id)
     seed_features = catalog.features_for(seed_track)
 
     random_generator = rng or random.Random()

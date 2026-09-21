@@ -35,7 +35,7 @@ from .library import (
 from .mpris_service import MprisService, start_mpris_service
 from .mpv_backend import MpvBackend, MpvUnavailableError
 from .player import PlayerEngine, QueueTask, start_queue_task
-from .player_bar import PlayerBar, _format_time
+from .player_bar import PlayerBar, format_time, track_line
 from .queue_panel import QueuePanel
 from .settings import DEFAULT_SETTINGS_PATH, Settings, save_settings
 from .settings_panel import FIELDS as SETTINGS_FIELDS
@@ -97,6 +97,20 @@ COLOR_HEADER = 3
 COLOR_QUEUE_HEAD = 4
 COLOR_PLAYER_BAR = 5
 COLOR_PROGRESS = 6
+
+
+def _fit(text: str, width: int) -> str:
+    """Pad or truncate `text` to exactly `width` columns.
+
+    Every row this UI draws needs the same thing: fill the column so the
+    previous frame's longer text is overwritten, and clip so it cannot spill
+    into the neighbouring column. Written out inline, that was
+    `text.ljust(width - 1)[: width - 1]` in twenty places, sometimes missing
+    the clip half.
+    """
+    if width <= 0:
+        return ""
+    return text[:width].ljust(width)
 
 
 class Player3Column:
@@ -814,18 +828,22 @@ class Player3Column:
 
             if self._adding_folder:
                 self._adding_folder = False
-                self._prompt_add_folder(stdscr)
+                self._begin_add_folder_scan(self._prompt_text(stdscr, "Add folder path: "))
             elif self.settings_panel.editing_text:
-                self._edit_text_field(stdscr)
+                self.settings_panel.apply_text_edit(
+                    self._prompt_text(stdscr, f"New {self.settings_panel.current_field()}: ")
+                )
 
-    def _prompt_add_folder(self, stdscr: curses._CursesWindow) -> None:
-        """Synchronously prompt for a folder path to add (blocking
-        curses.echo()/getstr(), same pattern as _edit_text_field)."""
+    def _prompt_text(self, stdscr: curses._CursesWindow, prompt: str) -> str:
+        """Read one line from the user with a blocking curses.echo()/getstr().
+
+        Used by the add-folder path prompt and the settings screen's text
+        fields. Needs `stdscr` directly, which is why it lives here rather
+        than in the key handlers. A path pasted by drag-and-drop arrives as
+        plain text, so it lands in this same prompt as a typed one.
+        """
         height, width = stdscr.getmaxyx()
-        prompt = "Add folder path: "
-        stdscr.addnstr(
-            height - 1, 0, prompt.ljust(width - 1), width - 1, curses.A_REVERSE
-        )
+        stdscr.addnstr(height - 1, 0, _fit(prompt, width - 1), width - 1, curses.A_REVERSE)
         stdscr.refresh()
 
         curses.echo()
@@ -833,38 +851,11 @@ class Player3Column:
         stdscr.timeout(-1)
         try:
             raw = stdscr.getstr(height - 1, len(prompt), width - len(prompt) - 1)
-            value = raw.decode("utf-8", errors="replace")
+            return raw.decode("utf-8", errors="replace")
         finally:
             curses.noecho()
             curses.curs_set(0)
             stdscr.timeout(POLL_INTERVAL_MS)
-
-        self._begin_add_folder_scan(value)
-
-    def _edit_text_field(self, stdscr: curses._CursesWindow) -> None:
-        """Synchronously prompt for a new value for the field currently being
-        text-edited (only src/settings_panel.py's `library_path` today).
-        Needs `stdscr` directly (curses.echo()/getstr()), which is why this
-        lives in run_loop's caller rather than handle_settings_input."""
-        height, width = stdscr.getmaxyx()
-        prompt = f"New {self.settings_panel.current_field()}: "
-        stdscr.addnstr(
-            height - 1, 0, prompt.ljust(width - 1), width - 1, curses.A_REVERSE
-        )
-        stdscr.refresh()
-
-        curses.echo()
-        curses.curs_set(1)
-        stdscr.timeout(-1)
-        try:
-            raw = stdscr.getstr(height - 1, len(prompt), width - len(prompt) - 1)
-            value = raw.decode("utf-8", errors="replace")
-        finally:
-            curses.noecho()
-            curses.curs_set(0)
-            stdscr.timeout(POLL_INTERVAL_MS)
-
-        self.settings_panel.apply_text_edit(value)
 
     @staticmethod
     def _compute_column_widths(width: int) -> tuple[int, int, int]:
@@ -1063,14 +1054,14 @@ class Player3Column:
             text = " [/] Search tracks..."
             attr = curses.A_DIM
 
-        stdscr.addnstr(row, 0, text.ljust(width - 1)[: width - 1], width - 1, attr)
+        stdscr.addnstr(row, 0, _fit(text, width - 1), width - 1, attr)
 
     def _render_folders(
         self, stdscr: curses._CursesWindow, row: int, col: int, width: int, height: int
     ) -> None:
         """Render folder list (All Tracks + tracked folders)."""
         stdscr.addnstr(
-            row, col, "Folders".ljust(width - 1), width - 1, self._header_attr(0)
+            row, col, _fit("Folders", width - 1), width - 1, self._header_attr(0)
         )
         row += 1
 
@@ -1083,7 +1074,7 @@ class Player3Column:
             stdscr.addnstr(
                 row,
                 col,
-                f"  {entry.display_name}".ljust(width - 1)[: width - 1],
+                _fit(f"  {entry.display_name}", width - 1),
                 width - 1,
                 attr,
             )
@@ -1095,7 +1086,7 @@ class Player3Column:
             stdscr.addnstr(
                 height - 1,
                 col,
-                self.folder_panel.status_message[: width - 1],
+                _fit(self.folder_panel.status_message, width - 1),
                 width - 1,
                 curses.A_DIM,
             )
@@ -1103,7 +1094,7 @@ class Player3Column:
             stdscr.addnstr(
                 height - 1,
                 col,
-                "[A] Add folder  [B] Analyze tempo  [U] Rescan".ljust(width - 1)[: width - 1],
+                _fit("[A] Add folder  [B] Analyze tempo  [U] Rescan", width - 1),
                 width - 1,
                 curses.A_DIM,
             )
@@ -1117,7 +1108,7 @@ class Player3Column:
         stdscr.addnstr(
             row,
             col,
-            header.ljust(width - 1)[: width - 1],
+            _fit(header, width - 1),
             width - 1,
             self._header_attr(1),
         )
@@ -1125,7 +1116,7 @@ class Player3Column:
 
         path_text = entry.path if entry and entry.path else ""
         stdscr.addnstr(
-            row, col, path_text.ljust(width - 1)[: width - 1], width - 1, curses.A_DIM
+            row, col, _fit(path_text, width - 1), width - 1, curses.A_DIM
         )
         row += 1
 
@@ -1133,7 +1124,7 @@ class Player3Column:
         if self.songs_panel.sort_mode != "default":
             count_text += f"  [sort: {self.songs_panel.sort_mode}]"
         stdscr.addnstr(
-            row, col, count_text.ljust(width - 1)[: width - 1], width - 1, curses.A_DIM
+            row, col, _fit(count_text, width - 1), width - 1, curses.A_DIM
         )
         row += 1
 
@@ -1142,7 +1133,7 @@ class Player3Column:
         stdscr.addnstr(
             row,
             col,
-            "[R] Play Random  [O] Sort".ljust(width - 1)[: width - 1],
+            _fit("[R] Play Random  [O] Sort", width - 1),
             width - 1,
             btn_attr,
         )
@@ -1166,9 +1157,9 @@ class Player3Column:
             index_part = f"{idx + 1:>3}."
             title_part = track.title[:title_width].ljust(title_width)
             artist_part = track.artist[: artist_width - 1].ljust(artist_width - 1)
-            duration_part = _format_time(track.duration) if track.duration else "--:--"
-            line = f"{index_part} {title_part} {artist_part} {duration_part:>5}"[: width - 1]
-            stdscr.addnstr(row, col, line.ljust(width - 1), width - 1, attr)
+            duration_part = format_time(track.duration) if track.duration else "--:--"
+            line = f"{index_part} {title_part} {artist_part} {duration_part:>5}"
+            stdscr.addnstr(row, col, _fit(line, width - 1), width - 1, attr)
             row += 1
 
     def _render_queue(
@@ -1184,30 +1175,29 @@ class Player3Column:
         stdscr.addnstr(
             row,
             col,
-            "Now Playing".ljust(width - 1)[: width - 1],
+            _fit("Now Playing", width - 1),
             width - 1,
             self._header_attr(2),
         )
         row += 1
 
         current = self.queue_panel.current_track
-        current_line = f"{current.artist} - {current.title}" if current else "(none)"
-        current_line = current_line[: width - 1]
-        stdscr.addnstr(row, col, current_line.ljust(width - 1), width - 1, head_attr)
+        current_line = track_line(current) if current else "(none)"
+        stdscr.addnstr(row, col, _fit(current_line, width - 1), width - 1, head_attr)
         row += 1
 
         stdscr.addnstr(
             row,
             col,
-            f"Queue ({len(self.queue_panel.queue)})".ljust(width - 1)[: width - 1],
+            _fit(f"Queue ({len(self.queue_panel.queue)})", width - 1),
             width - 1,
             curses.A_DIM,
         )
         row += 1
 
         for track, _ in self.queue_panel.get_visible_queue(height - row):
-            line = f"{track.artist} - {track.title}"[: width - 1]
-            stdscr.addnstr(row, col, line.ljust(width - 1), width - 1, curses.A_NORMAL)
+            line = track_line(track)
+            stdscr.addnstr(row, col, _fit(line, width - 1), width - 1, curses.A_NORMAL)
             row += 1
 
     @staticmethod
@@ -1231,7 +1221,7 @@ class Player3Column:
             else curses.A_REVERSE
         )
         info_line = self._centered(f"[{state}] {track_display} | {controls}", width - 1)
-        stdscr.addnstr(row, 0, info_line.ljust(width - 1), width - 1, bar_attr)
+        stdscr.addnstr(row, 0, _fit(info_line, width - 1), width - 1, bar_attr)
 
         progress_attr = (
             curses.color_pair(COLOR_PROGRESS) if self._has_colors else curses.A_NORMAL
@@ -1240,13 +1230,13 @@ class Player3Column:
             self.player_bar.get_progress_display(), width - 1
         )
         stdscr.addnstr(
-            row + 1, 0, progress_line.ljust(width - 1), width - 1, progress_attr
+            row + 1, 0, _fit(progress_line, width - 1), width - 1, progress_attr
         )
 
         if self.player_bar.status_message:
             status_line = self._centered(self.player_bar.status_message, width - 1)
             stdscr.addnstr(
-                row + 2, 0, status_line.ljust(width - 1), width - 1, curses.A_DIM
+                row + 2, 0, _fit(status_line, width - 1), width - 1, curses.A_DIM
             )
 
     def _render_settings(
@@ -1254,7 +1244,7 @@ class Player3Column:
     ) -> None:
         """Full-screen settings editor, replacing the 3-column layout."""
         panel = self.settings_panel
-        stdscr.addnstr(0, 0, "Settings".ljust(width - 1), width - 1, curses.A_BOLD)
+        stdscr.addnstr(0, 0, _fit("Settings", width - 1), width - 1, curses.A_BOLD)
 
         values = {
             "top_k": str(panel.top_k),
@@ -1269,13 +1259,13 @@ class Player3Column:
                 self._cursor_attr(0) if index == panel.field_index else curses.A_NORMAL
             )
             line = f"{field_name}: {values[field_name]}"
-            stdscr.addnstr(row, 2, line.ljust(width - 3)[: width - 3], width - 3, attr)
+            stdscr.addnstr(row, 2, _fit(line, width - 3), width - 3, attr)
             row += 1
 
         row += 1
         if panel.status_message:
             stdscr.addnstr(
-                row, 2, panel.status_message[: width - 3], width - 3, curses.A_DIM
+                row, 2, _fit(panel.status_message, width - 3), width - 3, curses.A_DIM
             )
             row += 1
 
@@ -1283,7 +1273,7 @@ class Player3Column:
             "[Up/Down] Move  [+/-] Adjust  [Enter] Edit  [A] Apply&Save  [Esc] Cancel"
         )
         stdscr.addnstr(
-            height - 1, 0, hint.ljust(width - 1)[: width - 1], width - 1, curses.A_DIM
+            height - 1, 0, _fit(hint, width - 1), width - 1, curses.A_DIM
         )
 
 

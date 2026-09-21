@@ -286,18 +286,16 @@ def _artist_keys(artist: str) -> frozenset[str]:
     return frozenset(keys) or frozenset({artist.casefold()})
 
 
-def _id_from_path(path: Path) -> str:
-    """Stable short id derived from a resolved filesystem path.
+def id_from_path(path: Path) -> str:
+    """Stable short id derived from an already-resolved filesystem path.
 
     Shared by track ids here and folder ids in library.py -- both need the
-    same "same resolved path always yields the same id" property.
+    same "same resolved path always yields the same id" property. The caller
+    resolves, so a scan that has already paid for one `resolve()` per file
+    does not pay for a second.
     """
-    digest = hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()
+    digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()
     return digest[:16]
-
-
-def _track_id_from_path(path: Path) -> str:
-    return _id_from_path(path)
 
 
 def _split_artist_title(stem: str) -> tuple[str, str]:
@@ -641,9 +639,12 @@ def _coerce_int(value: Any) -> int | None:
 def _scan_one(path: Path, folder_id: str = "") -> TrackRecord:
     artist, title = _split_artist_title(path.stem)
     tag_metadata = _read_tag_metadata(path)
+    # Resolved once and reused: the id and the stored path both need it, and
+    # a scan pays this per file across thousands of them.
+    resolved = path.resolve()
     return TrackRecord(
-        id=_track_id_from_path(path),
-        path=str(path.resolve()),
+        id=id_from_path(resolved),
+        path=str(resolved),
         title=title,
         artist=artist,
         album=tag_metadata.get("album", ""),

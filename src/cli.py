@@ -20,7 +20,7 @@ from .library import (
     rescan_folder,
     save_library,
 )
-from .predictor import generate_queue, rank_candidates, recommend_next_track
+from .predictor import find_track, generate_queue, rank_candidates, recommend_next_track
 from .settings import DEFAULT_SETTINGS_PATH, Settings, load_settings
 from .track_analyzer import (
     Catalog,
@@ -50,13 +50,6 @@ def _randomness(value: str) -> float:
 def _format_track(track: TrackRecord) -> str:
     status = "enabled" if track.enabled else "disabled"
     return f"{track.id}  [{status}]  {track.artist} - {track.title}"
-
-
-def _find_track(catalog: Catalog, track_id: str) -> TrackRecord:
-    for track in catalog.tracks:
-        if track.id == track_id:
-            return track
-    raise ValueError(f"Track not found in catalog: {track_id}")
 
 
 def _build_catalog(music_dir: Path, catalog_path: Path) -> Catalog:
@@ -109,7 +102,7 @@ def _command_list_tracks(args: argparse.Namespace) -> None:
 
 def _command_inspect_track(args: argparse.Namespace) -> None:
     catalog = _load_or_build_catalog(args.catalog, args.music_dir)
-    track = _find_track(catalog, args.track_id)
+    track = find_track(catalog, args.track_id)
     print(_format_track(track))
     print(f"Path: {track.path}")
     print(f"Album: {track.album or 'unknown'}")
@@ -123,7 +116,7 @@ def _command_inspect_track(args: argparse.Namespace) -> None:
 
 def _command_recommend(args: argparse.Namespace) -> None:
     catalog = _load_or_build_catalog(args.catalog, args.music_dir)
-    current_track = _find_track(catalog, args.track_id)
+    current_track = find_track(catalog, args.track_id)
     ranked_candidates = rank_candidates(args.track_id, catalog)
     top_candidates = ranked_candidates[: args.top_k]
 
@@ -145,7 +138,7 @@ def _command_recommend(args: argparse.Namespace) -> None:
 
 def _command_queue(args: argparse.Namespace) -> None:
     catalog = _load_or_build_catalog(args.catalog, args.music_dir)
-    current_track = _find_track(catalog, args.track_id)
+    current_track = find_track(catalog, args.track_id)
     queue = generate_queue(
         args.track_id,
         catalog,
@@ -189,14 +182,30 @@ def _resolve_library_path(args: argparse.Namespace, settings: Settings | None) -
     raise ValueError("No library path given: pass --library or ensure settings.json exists.")
 
 
-def _command_add_folder(args: argparse.Namespace, settings: Settings | None = None) -> None:
+def _open_library(
+    args: argparse.Namespace, settings: Settings | None, *, create_missing: bool = False
+) -> tuple[Library, Path]:
+    """Resolve the library path and load it. Every library command starts here."""
     library_path = _resolve_library_path(args, settings)
-    library = load_library(library_path) if library_path.exists() else new_library()
+    if create_missing and not library_path.exists():
+        return new_library(), library_path
+    return load_library(library_path), library_path
 
-    def _print_progress(scanned: int, total: int) -> None:
-        print(f"\rScanning: {scanned}/{total}", end="", flush=True)
 
-    new_lib, folder, was_added = add_folder(library, args.path, progress_callback=_print_progress)
+def _progress_printer(label: str) -> Callable[[int, int], None]:
+    """A `progress_callback` that redraws "label: scanned/total" in place."""
+
+    def _print(scanned: int, total: int) -> None:
+        print(f"\r{label}: {scanned}/{total}", end="", flush=True)
+
+    return _print
+
+
+def _command_add_folder(args: argparse.Namespace, settings: Settings | None = None) -> None:
+    library, library_path = _open_library(args, settings, create_missing=True)
+    new_lib, folder, was_added = add_folder(
+        library, args.path, progress_callback=_progress_printer("Scanning")
+    )
     print()
     save_library(new_lib, library_path)
     verb = "Added" if was_added else "Rescanned"
@@ -204,16 +213,14 @@ def _command_add_folder(args: argparse.Namespace, settings: Settings | None = No
 
 
 def _command_list_folders(args: argparse.Namespace, settings: Settings | None = None) -> None:
-    library_path = _resolve_library_path(args, settings)
-    library = load_library(library_path)
+    library, _ = _open_library(args, settings)
     for folder in list_folders(library):
         print(f"{folder.id}  {folder.track_count:5d} tracks  {folder.path}")
     print(f"{len(library.folders)} folders, {len(library.catalog.tracks)} tracks total.")
 
 
 def _command_analyze_bpm(args: argparse.Namespace, settings: Settings | None = None) -> None:
-    library_path = _resolve_library_path(args, settings)
-    library = load_library(library_path)
+    library, library_path = _open_library(args, settings)
     pending = tracks_needing_bpm(library.catalog.tracks)
     already = len(library.catalog.tracks) - len(pending)
 
@@ -255,22 +262,18 @@ def _command_analyze_bpm(args: argparse.Namespace, settings: Settings | None = N
 
 
 def _command_remove_folder(args: argparse.Namespace, settings: Settings | None = None) -> None:
-    library_path = _resolve_library_path(args, settings)
-    library = load_library(library_path)
+    library, library_path = _open_library(args, settings)
     new_lib = remove_folder(library, args.folder_id)
     save_library(new_lib, library_path)
     print(f"Removed folder {args.folder_id}. {len(new_lib.folders)} folders remain.")
 
 
 def _command_rescan_folder(args: argparse.Namespace, settings: Settings | None = None) -> None:
-    library_path = _resolve_library_path(args, settings)
-    library = load_library(library_path)
-
-    def _print_progress(scanned: int, total: int) -> None:
-        print(f"\rRescanning: {scanned}/{total}", end="", flush=True)
-
+    library, library_path = _open_library(args, settings)
     try:
-        new_lib, track_count = rescan_folder(library, args.folder_id, progress_callback=_print_progress)
+        new_lib, track_count = rescan_folder(
+            library, args.folder_id, progress_callback=_progress_printer("Rescanning")
+        )
     except KeyError as error:
         raise SystemExit(str(error)) from error
     print()

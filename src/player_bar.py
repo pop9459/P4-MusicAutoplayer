@@ -6,10 +6,16 @@ from dataclasses import dataclass
 from .track_analyzer import TrackRecord
 
 
-def _format_time(seconds: float) -> str:
+def format_time(seconds: float) -> str:
     total_seconds = max(0, int(seconds))
     minutes, secs = divmod(total_seconds, 60)
     return f"{minutes}:{secs:02d}"
+
+
+def track_line(track: TrackRecord) -> str:
+    """The one-line "Artist - Title" form, used by the player bar, the
+    now-playing line and every queue row."""
+    return f"{track.artist} - {track.title}"
 
 
 @dataclass
@@ -45,7 +51,7 @@ class PlayerBar:
         """Format track for display."""
         if not self.current_track:
             return "[No track]"
-        return f"{self.current_track.artist} - {self.current_track.title}"
+        return track_line(self.current_track)
 
     def get_state_display(self) -> str:
         """Get play state display."""
@@ -60,4 +66,4 @@ class PlayerBar:
         filled = int(round(fraction * bar_width))
         filled = max(0, min(bar_width, filled))
         bar = "=" * max(0, filled - 1) + (">" if filled else "") + "-" * (bar_width - filled)
-        return f"[{bar}] {_format_time(self.time_pos)} / {_format_time(self.duration)}"
+        return f"[{bar}] {format_time(self.time_pos)} / {format_time(self.duration)}"

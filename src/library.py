@@ -11,8 +11,8 @@ from .settings import Settings
 from .track_analyzer import (
     Catalog,
     TrackRecord,
-    _id_from_path,
     build_catalog,
+    id_from_path,
     load_catalog,
     scan_library,
     scan_library_with_progress,
@@ -24,10 +24,6 @@ ALL_TRACKS_FOLDER_ID = "__all__"
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _folder_id_from_path(path: Path) -> str:
-    return _id_from_path(path)
 
 
 @dataclass(slots=True)
@@ -136,7 +132,7 @@ def add_folder(
         updated_folder = next(f for f in new_library_value.folders if f.id == existing.id)
         return new_library_value, updated_folder, False
 
-    folder_id = _folder_id_from_path(resolved)
+    folder_id = id_from_path(resolved)
     new_tracks = scan_library_with_progress(
         resolved, folder_id=folder_id, progress_callback=progress_callback
     )
@@ -267,7 +263,7 @@ def migrate_settings_to_library(settings: Settings, settings_path: Path) -> Libr
         folder_id = ""
         for _, resolved_path in resolved_legacy:
             if track.path == resolved_path or track.path.startswith(resolved_path + "/"):
-                folder_id = _folder_id_from_path(Path(resolved_path))
+                folder_id = id_from_path(Path(resolved_path))
                 break
         stamped_tracks.append(
             TrackRecord(
@@ -287,7 +283,7 @@ def migrate_settings_to_library(settings: Settings, settings_path: Path) -> Libr
 
     timestamp = _now_iso()
     for folder, resolved_path in resolved_legacy:
-        folder_id = _folder_id_from_path(Path(resolved_path))
+        folder_id = id_from_path(Path(resolved_path))
         track_count = sum(1 for track in stamped_tracks if track.folder_id == folder_id)
         folders.append(
             LibraryFolder(

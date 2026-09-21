@@ -49,15 +49,20 @@ def _require_randomness(payload: dict[str, Any]) -> float:
     return float(value)
 
 
-def _load_max_consecutive_same_artist(payload: dict[str, Any]) -> int | None:
-    """Optional cap on same-artist tracks in a row; absent/null disables it.
+def _load_optional(payload: dict[str, Any], name: str, default: Any, validate) -> Any:
+    """Read an optional settings field, defaulting when it is absent.
 
-    New field with a default, so existing settings.json files without it
-    keep working (unlike top_k/randomness/queue_length, which are required).
+    Fields added after v1 shipped must not break existing settings.json files
+    that predate them (unlike top_k/randomness/queue_length, which are
+    required). `validate` is called only when the key is actually present.
     """
-    if "max_consecutive_same_artist" not in payload:
-        return DEFAULT_MAX_CONSECUTIVE_SAME_ARTIST
-    value = payload.get("max_consecutive_same_artist")
+    if name not in payload:
+        return default
+    return validate(payload.get(name))
+
+
+def _validate_max_consecutive_same_artist(value: Any) -> int | None:
+    """A positive cap, or null to disable the same-artist limit entirely."""
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -65,15 +70,7 @@ def _load_max_consecutive_same_artist(payload: dict[str, Any]) -> int | None:
     return value
 
 
-def _load_normalize_volume(payload: dict[str, Any]) -> bool:
-    """Optional loudness-normalization toggle; absent means disabled.
-
-    New field with a default, so existing settings.json files without it
-    keep working (same pattern as max_consecutive_same_artist).
-    """
-    if "normalize_volume" not in payload:
-        return False
-    value = payload.get("normalize_volume")
+def _validate_normalize_volume(value: Any) -> bool:
     if not isinstance(value, bool):
         raise ValueError("Settings field 'normalize_volume' must be a boolean")
     return value
@@ -144,8 +141,13 @@ def load_settings(path: str | Path = DEFAULT_SETTINGS_PATH) -> Settings:
         top_k=_require_positive_int(payload, "top_k"),
         randomness=_require_randomness(payload),
         queue_length=_require_positive_int(payload, "queue_length"),
-        max_consecutive_same_artist=_load_max_consecutive_same_artist(payload),
-        normalize_volume=_load_normalize_volume(payload),
+        max_consecutive_same_artist=_load_optional(
+            payload,
+            "max_consecutive_same_artist",
+            DEFAULT_MAX_CONSECUTIVE_SAME_ARTIST,
+            _validate_max_consecutive_same_artist,
+        ),
+        normalize_volume=_load_optional(payload, "normalize_volume", False, _validate_normalize_volume),
         catalog_path=catalog_path,
         music_directory=music_directory,
         music_folders=music_folders,
