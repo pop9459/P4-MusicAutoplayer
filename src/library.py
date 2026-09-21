@@ -11,8 +11,8 @@ from .settings import Settings
 from .track_analyzer import (
     Catalog,
     TrackRecord,
-    _id_from_path,
     build_catalog,
+    id_from_path,
     load_catalog,
     scan_library,
     scan_library_with_progress,
@@ -24,10 +24,6 @@ ALL_TRACKS_FOLDER_ID = "__all__"
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _folder_id_from_path(path: Path) -> str:
-    return _id_from_path(path)
 
 
 @dataclass(slots=True)
@@ -136,7 +132,7 @@ def add_folder(
         updated_folder = next(f for f in new_library_value.folders if f.id == existing.id)
         return new_library_value, updated_folder, False
 
-    folder_id = _folder_id_from_path(resolved)
+    folder_id = id_from_path(resolved)
     new_tracks = scan_library_with_progress(
         resolved, folder_id=folder_id, progress_callback=progress_callback
     )
@@ -170,10 +166,18 @@ def rescan_folder(
     on disk (e.g. duration for tracks scanned before that field existed).
 
     Drops tracks for files no longer in the folder and picks up new ones,
-    same as a fresh add_folder scan would. Each surviving track's `enabled`
-    flag is carried over from the existing record, since a fresh scan
-    otherwise defaults to enabled=True and would silently re-enable tracks
-    the user disabled.
+    same as a fresh add_folder scan would.
+
+    Two fields survive the rescan, because a fresh scan cannot recover them
+    from the file and would silently destroy them:
+
+    - `enabled`, which a scan defaults to True, silently re-enabling tracks
+      the user had disabled.
+    - `bpm`, when the file itself carries no BPM tag. That is the common case
+      -- `analyze-bpm` detects tempo from the audio and stores it only in the
+      library, so a rescan that took the scan's result verbatim would throw
+      away an entire analysis run (tens of minutes) for the rescanned folder.
+      A real tag still wins: if the file now has one, the fresh value is used.
     """
     folder = next((f for f in library.folders if f.id == folder_id), None)
     if folder is None:
@@ -187,14 +191,18 @@ def rescan_folder(
         resolved, folder_id=folder_id, progress_callback=progress_callback
     )
 
-    previously_enabled = {
-        track.id: track.enabled
+    previous = {
+        track.id: track
         for track in library.catalog.tracks
         if track.folder_id == folder_id
     }
     for track in fresh_tracks:
-        if track.id in previously_enabled:
-            track.enabled = previously_enabled[track.id]
+        existing = previous.get(track.id)
+        if existing is None:
+            continue
+        track.enabled = existing.enabled
+        if track.bpm is None:
+            track.bpm = existing.bpm
 
     other_tracks = [track for track in library.catalog.tracks if track.folder_id != folder_id]
     new_catalog = build_catalog(other_tracks + fresh_tracks)
@@ -258,6 +266,9 @@ def migrate_settings_to_library(settings: Settings, settings_path: Path) -> Libr
 
     folders: list[LibraryFolder] = []
     resolved_legacy = [(folder, str(folder.resolve())) for folder in legacy_folders]
+    # Captured before the sort below reorders it: this is settings.music_folders
+    # order, which the finished folder list is restored to for a stable display.
+    original_order = {resolved: index for index, (_, resolved) in enumerate(resolved_legacy)}
     # Longest path first so a nested folder wins over its parent when
     # matching a track's resolved path to a legacy folder.
     resolved_legacy.sort(key=lambda pair: len(pair[1]), reverse=True)
@@ -267,7 +278,7 @@ def migrate_settings_to_library(settings: Settings, settings_path: Path) -> Libr
         folder_id = ""
         for _, resolved_path in resolved_legacy:
             if track.path == resolved_path or track.path.startswith(resolved_path + "/"):
-                folder_id = _folder_id_from_path(Path(resolved_path))
+                folder_id = id_from_path(Path(resolved_path))
                 break
         stamped_tracks.append(
             TrackRecord(
@@ -287,7 +298,7 @@ def migrate_settings_to_library(settings: Settings, settings_path: Path) -> Libr
 
     timestamp = _now_iso()
     for folder, resolved_path in resolved_legacy:
-        folder_id = _folder_id_from_path(Path(resolved_path))
+        folder_id = id_from_path(Path(resolved_path))
         track_count = sum(1 for track in stamped_tracks if track.folder_id == folder_id)
         folders.append(
             LibraryFolder(
@@ -299,8 +310,10 @@ def migrate_settings_to_library(settings: Settings, settings_path: Path) -> Libr
                 track_count=track_count,
             )
         )
-    # Restore original settings.music_folders order for a stable display.
-    folders.sort(key=lambda f: [str(p.resolve()) for p in legacy_folders].index(f.path))
+    # Restore settings.music_folders order. The index map is built once, above:
+    # as a sort key this re-resolved every legacy folder -- a filesystem call --
+    # on every comparison.
+    folders.sort(key=lambda folder: original_order[folder.path])
 
     catalog = build_catalog(stamped_tracks)
     library = Library(version=LIBRARY_VERSION, folders=folders, catalog=catalog)
@@ -339,29 +352,6 @@ def start_add_folder_task(library: Library, path: str | Path) -> ScanTask:
             outcome = add_folder(library, path, progress_callback=_on_progress)
             task.result.append(outcome)
         except (FileNotFoundError, NotADirectoryError, OSError) as error:
-            task.error.append(error)
-        finally:
-            task.done.set()
-
-    thread = threading.Thread(target=_run, daemon=True)
-    task.thread = thread
-    thread.start()
-    return task
-
-
-def start_rescan_folder_task(library: Library, folder_id: str) -> ScanTask:
-    task = ScanTask(thread=None)
-
-    def _on_progress(scanned: int, total: int) -> None:
-        with task.lock:
-            task._progress[0] = scanned
-            task._progress[1] = total
-
-    def _run() -> None:
-        try:
-            outcome = rescan_folder(library, folder_id, progress_callback=_on_progress)
-            task.result.append(outcome)
-        except (KeyError, FileNotFoundError, OSError) as error:
             task.error.append(error)
         finally:
             task.done.set()

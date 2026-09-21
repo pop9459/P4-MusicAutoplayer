@@ -170,13 +170,3 @@ class SongsPanel:
             is_selected = i == self.selected_index
             result.append((self.songs[i], i, is_selected))
         return result
-
-    def clear(self) -> None:
-        """Clear songs (e.g., when switching folders)."""
-        self.all_songs = []
-        self.songs = []
-        self.filter_query = ""
-        self.selected_index = 0
-        self.selected_song = None
-        self.scroll_offset = 0
-        self.status_message = "No songs."

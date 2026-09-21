@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -85,23 +85,51 @@ def _normalize_text(value: str | None, default: str = "") -> str:
     return " ".join(value.strip().split())
 
 
+# Exact-match genre aliases: a tag that *is* one of these is simply another
+# spelling of the canonical label.
+_GENRE_ALIASES = {
+    "dance pop": "pop",
+    "electro pop": "pop",
+    "edm": "electronic",
+    "hip hop": "hip-hop",
+    "hiphop": "hip-hop",
+    "r and b": "r&b",
+    "rnb": "r&b",
+}
+
+# Real-world genre tags are highly fragmented (e.g. "australian rock",
+# "classic rock", "album rock" are all just "rock"). Without folding these
+# into broad families, genre similarity can't bridge related artists tagged
+# with slightly different strings, and content-based recommendations end up
+# isolated to a single artist's exact tag. Checked in order from most to
+# least specific so compound genres (e.g. "hip hop soul") resolve predictably.
+_GENRE_KEYWORD_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
+    ("hip-hop", ("hip hop", "hiphop", "rap", "trap")),
+    ("r&b", ("r&b", "r and b", "rnb", "soul")),
+    ("electronic", ("house", "edm", "electro", "techno", "trance", "dubstep", "dance", "big room")),
+    ("metal", ("metal",)),
+    ("rock", ("rock",)),
+    ("country", ("country",)),
+    ("reggae", ("reggae", "dancehall")),
+    ("latin", ("latin", "reggaeton", "salsa", "cumbia")),
+    ("folk", ("folk", "ludov", "heligonka")),
+    ("jazz", ("jazz",)),
+    ("classical", ("classical",)),
+    ("pop", ("pop",)),
+]
+
+_WHITESPACE_RUN = re.compile(r"[\s_]+")
+
+
 def canonicalize_genre(value: str | None) -> str:
     cleaned = _normalize_text(value, default="unknown").lower()
     if not cleaned:
         return "unknown"
-    cleaned = re.sub(r"[\s_]+", " ", cleaned)
+    cleaned = _WHITESPACE_RUN.sub(" ", cleaned)
 
-    exact_alias_map = {
-        "dance pop": "pop",
-        "electro pop": "pop",
-        "edm": "electronic",
-        "hip hop": "hip-hop",
-        "hiphop": "hip-hop",
-        "r and b": "r&b",
-        "rnb": "r&b",
-    }
-    if cleaned in exact_alias_map:
-        return exact_alias_map[cleaned]
+    alias = _GENRE_ALIASES.get(cleaned)
+    if alias is not None:
+        return alias
 
     # A label the grouping tree names explicitly keeps its own identity. The
     # keyword folding below is deliberately broad, so without this it would
@@ -112,28 +140,7 @@ def canonicalize_genre(value: str | None) -> str:
     if cleaned in _GENRE_TREE:
         return cleaned
 
-    # Real-world genre tags are highly fragmented (e.g. "australian rock",
-    # "classic rock", "album rock" are all just "rock"). Without folding
-    # these into broad families, genre similarity can't bridge related
-    # artists tagged with slightly different strings, and content-based
-    # recommendations end up isolated to a single artist's exact tag.
-    # Checked in order from most to least specific so compound genres
-    # (e.g. "hip hop soul") resolve predictably.
-    keyword_families: list[tuple[str, tuple[str, ...]]] = [
-        ("hip-hop", ("hip hop", "hiphop", "rap", "trap")),
-        ("r&b", ("r&b", "r and b", "rnb", "soul")),
-        ("electronic", ("house", "edm", "electro", "techno", "trance", "dubstep", "dance", "big room")),
-        ("metal", ("metal",)),
-        ("rock", ("rock",)),
-        ("country", ("country",)),
-        ("reggae", ("reggae", "dancehall")),
-        ("latin", ("latin", "reggaeton", "salsa", "cumbia")),
-        ("folk", ("folk", "ludov", "heligonka")),
-        ("jazz", ("jazz",)),
-        ("classical", ("classical",)),
-        ("pop", ("pop",)),
-    ]
-    for canonical, keywords in keyword_families:
+    for canonical, keywords in _GENRE_KEYWORD_FAMILIES:
         if any(keyword in cleaned for keyword in keywords):
             return canonical
 
@@ -286,18 +293,16 @@ def _artist_keys(artist: str) -> frozenset[str]:
     return frozenset(keys) or frozenset({artist.casefold()})
 
 
-def _id_from_path(path: Path) -> str:
-    """Stable short id derived from a resolved filesystem path.
+def id_from_path(path: Path) -> str:
+    """Stable short id derived from an already-resolved filesystem path.
 
     Shared by track ids here and folder ids in library.py -- both need the
-    same "same resolved path always yields the same id" property.
+    same "same resolved path always yields the same id" property. The caller
+    resolves, so a scan that has already paid for one `resolve()` per file
+    does not pay for a second.
     """
-    digest = hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()
+    digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()
     return digest[:16]
-
-
-def _track_id_from_path(path: Path) -> str:
-    return _id_from_path(path)
 
 
 def _split_artist_title(stem: str) -> tuple[str, str]:
@@ -599,6 +604,9 @@ class Catalog:
         return cached
 
     def to_dict(self) -> dict[str, Any]:
+        # `asdict()` would deep-copy recursively per track; TrackRecord is a
+        # flat slots dataclass, so a literal is equivalent and much cheaper
+        # over a run that rewrites the whole library on every BPM checkpoint.
         # "feature_space" is descriptive only since v2 -- similarity no longer
         # depends on a shared vector space, so these are kept for `summary`
         # and for a human reading the file, not consumed by scoring.
@@ -616,8 +624,24 @@ class Catalog:
                 "year_min": self.year_min,
                 "year_max": self.year_max,
             },
-            "tracks": [asdict(track) for track in self.tracks],
+            "tracks": [_track_to_dict(track) for track in self.tracks],
         }
+
+
+def _track_to_dict(track: TrackRecord) -> dict[str, Any]:
+    return {
+        "id": track.id,
+        "path": track.path,
+        "title": track.title,
+        "artist": track.artist,
+        "album": track.album,
+        "genre": track.genre,
+        "bpm": track.bpm,
+        "year": track.year,
+        "enabled": track.enabled,
+        "folder_id": track.folder_id,
+        "duration": track.duration,
+    }
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -641,9 +665,12 @@ def _coerce_int(value: Any) -> int | None:
 def _scan_one(path: Path, folder_id: str = "") -> TrackRecord:
     artist, title = _split_artist_title(path.stem)
     tag_metadata = _read_tag_metadata(path)
+    # Resolved once and reused: the id and the stored path both need it, and
+    # a scan pays this per file across thousands of them.
+    resolved = path.resolve()
     return TrackRecord(
-        id=_track_id_from_path(path),
-        path=str(path.resolve()),
+        id=id_from_path(resolved),
+        path=str(resolved),
         title=title,
         artist=artist,
         album=tag_metadata.get("album", ""),

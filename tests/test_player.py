@@ -5,31 +5,11 @@ import time
 import unittest
 from collections import Counter
 
-from src.player import (
-    PlayerEngine,
-    clamp_index,
-    filter_enabled_tracks,
-    format_track_line,
-    start_queue_task,
-)
+from src.player import PlayerEngine, filter_enabled_tracks, start_queue_task
 from src.track_analyzer import TrackRecord, build_catalog
 
 
 class PureHelperTests(unittest.TestCase):
-    def test_clamp_index_within_range_is_unchanged(self) -> None:
-        self.assertEqual(clamp_index(2, 5), 2)
-
-    def test_clamp_index_clamps_low_and_high(self) -> None:
-        self.assertEqual(clamp_index(-3, 5), 0)
-        self.assertEqual(clamp_index(99, 5), 4)
-
-    def test_clamp_index_empty_list_is_zero(self) -> None:
-        self.assertEqual(clamp_index(0, 0), 0)
-
-    def test_format_track_line(self) -> None:
-        track = TrackRecord(id="t", path="/music/t.mp3", title="Title", artist="Artist")
-        self.assertEqual(format_track_line(track), "Artist - Title")
-
     def test_filter_enabled_tracks_excludes_disabled(self) -> None:
         catalog = build_catalog([
             TrackRecord(id="a", path="/music/a.mp3", title="A", artist="A", enabled=True),

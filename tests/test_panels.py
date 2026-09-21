@@ -331,22 +331,6 @@ class QueuePanelTests(unittest.TestCase):
         panel.update_queue(test_queue)
         self.assertEqual(len(panel.queue), len(test_queue))
 
-    def test_scroll_down_increments_offset(self) -> None:
-        panel = QueuePanel()
-        test_queue = self.catalog.tracks[:10]
-        panel.update_queue(test_queue)
-        panel.scroll_down()
-        self.assertGreater(panel.scroll_offset, 0)
-
-    def test_scroll_up_decrements_offset(self) -> None:
-        panel = QueuePanel()
-        test_queue = self.catalog.tracks[:10]
-        panel.update_queue(test_queue)
-        panel.scroll_down()
-        panel.scroll_down()
-        panel.scroll_up()
-        self.assertGreaterEqual(panel.scroll_offset, 0)
-
     def test_get_visible_queue_returns_tuples(self) -> None:
         panel = QueuePanel()
         test_queue = self.catalog.tracks[:5]

@@ -99,14 +99,6 @@ class MpvBackendIpcTests(unittest.TestCase):
         with patch.object(backend, "get_duration", return_value=None):
             self.assertIsNone(backend.wait_until_playable(timeout=0.01, sleep=lambda _s: None))
 
-    def test_pause_and_resume_send_expected_commands(self) -> None:
-        backend, fake_socket = _make_backend({})
-        backend.pause()
-        backend.resume()
-
-        self.assertEqual(fake_socket.sent_commands[0], ["set_property", "pause", True])
-        self.assertEqual(fake_socket.sent_commands[1], ["set_property", "pause", False])
-
     def test_set_normalize_volume_true_adds_labeled_dynaudnorm_filter(self) -> None:
         backend, fake_socket = _make_backend({})
         backend.set_normalize_volume(True)

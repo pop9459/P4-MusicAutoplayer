@@ -3,8 +3,11 @@ testTracks/*
 !testTracks/readme.txt
 **/catalog.json
 
-# Central library database (tracked folders + merged catalog).
+# Central library database (tracked folders + merged catalog), and the raw
+# single-folder catalogs the debug CLI builds. Both are generated from local
+# music files and contain absolute paths into this machine.
 data/library.json
+data/tracks.json
 
 # Generated Python bytecode.
 __pycache__/

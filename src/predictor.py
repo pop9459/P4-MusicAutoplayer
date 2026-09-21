@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import random
 from collections import Counter
-from pathlib import Path
 from typing import Collection, Sequence
 
-from .track_analyzer import Catalog, TrackFeatures, TrackRecord, load_catalog, track_similarity
+from .track_analyzer import Catalog, TrackFeatures, TrackRecord, track_similarity
 
 
 def rank_candidates_by_features(
@@ -40,7 +39,8 @@ def rank_candidates_by_features(
     return candidates
 
 
-def _find_track(catalog: Catalog, track_id: str) -> TrackRecord:
+def find_track(catalog: Catalog, track_id: str) -> TrackRecord:
+    """Look up one track by id, or raise ValueError naming the missing id."""
     track = next((item for item in catalog.tracks if item.id == track_id), None)
     if track is None:
         raise ValueError(f"Track not found in catalog: {track_id}")
@@ -108,7 +108,7 @@ def rank_candidates(
     catalog: Catalog,
     excluded_track_ids: Collection[str] = (),
 ) -> list[tuple[TrackRecord, float]]:
-    current_track = _find_track(catalog, current_track_id)
+    current_track = find_track(catalog, current_track_id)
     return rank_candidates_by_features(
         catalog.features_for(current_track),
         catalog,
@@ -162,16 +162,6 @@ def recommend_next_track(
     return _sample_weighted_candidates(ranked_candidates, randomness, rng or random.Random())
 
 
-def recommend_next_track_from_json(
-    catalog_path: str | Path,
-    current_track_id: str,
-    top_k: int = 5,
-    randomness: float = 0.0,
-    rng: random.Random | None = None,
-) -> TrackRecord:
-    catalog = load_catalog(catalog_path)
-    return recommend_next_track(current_track_id, catalog, top_k=top_k, randomness=randomness, rng=rng)
-
 # Fraction of each ranking step's score drawn from similarity to the original
 # seed track rather than to the previously picked track. Chaining purely off
 # the last pick lets small similarity drifts compound step over step, so a
@@ -201,7 +191,7 @@ def generate_queue_steps(
     if length < 1:
         raise ValueError("Queue length must be at least 1")
 
-    seed_track = _find_track(catalog, current_track_id)
+    seed_track = find_track(catalog, current_track_id)
     seed_features = catalog.features_for(seed_track)
 
     random_generator = rng or random.Random()
@@ -255,16 +245,3 @@ def generate_queue(
             max_consecutive_same_artist=max_consecutive_same_artist,
         )
     )
-
-
-def generate_queue_from_json(
-    catalog_path: str | Path,
-    current_track_id: str,
-    length: int = 10,
-    top_k: int = 5,
-    randomness: float = 0.0,
-    rng: random.Random | None = None,
-    max_consecutive_same_artist: int | None = 3,
-) -> list[TrackRecord]:
-    catalog = load_catalog(catalog_path)
-    return generate_queue(current_track_id, catalog, length, top_k, randomness, rng, max_consecutive_same_artist)
