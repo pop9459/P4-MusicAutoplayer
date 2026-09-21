@@ -237,9 +237,14 @@ def _command_analyze_bpm(args: argparse.Namespace, settings: Settings | None = N
     print("Safe to interrupt: progress is saved as it goes and a re-run picks up where it left off.")
 
     def _save() -> None:
-        # The catalog is rebuilt so the derived feature cache picks up the
-        # new tempi; tracks already hold the values, so this is cheap.
-        library.catalog = build_catalog(library.catalog.tracks)
+        # Drop the analyzed tracks' cached features so they re-derive with the
+        # new tempo on the next lookup. This used to call build_catalog over
+        # the whole library on every checkpoint, which reconstructs every
+        # TrackRecord and re-runs genre canonicalization for all of them --
+        # the same result at a fraction of the cost. Same approach the TUI
+        # already takes (see player_ui_v2._apply_bpm_results).
+        for track in pending:
+            library.catalog.track_features.pop(track.id, None)
         save_library(library, library_path)
 
     def _progress(index: int, total: int, track: TrackRecord) -> None:

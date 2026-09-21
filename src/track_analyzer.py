@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -85,23 +85,51 @@ def _normalize_text(value: str | None, default: str = "") -> str:
     return " ".join(value.strip().split())
 
 
+# Exact-match genre aliases: a tag that *is* one of these is simply another
+# spelling of the canonical label.
+_GENRE_ALIASES = {
+    "dance pop": "pop",
+    "electro pop": "pop",
+    "edm": "electronic",
+    "hip hop": "hip-hop",
+    "hiphop": "hip-hop",
+    "r and b": "r&b",
+    "rnb": "r&b",
+}
+
+# Real-world genre tags are highly fragmented (e.g. "australian rock",
+# "classic rock", "album rock" are all just "rock"). Without folding these
+# into broad families, genre similarity can't bridge related artists tagged
+# with slightly different strings, and content-based recommendations end up
+# isolated to a single artist's exact tag. Checked in order from most to
+# least specific so compound genres (e.g. "hip hop soul") resolve predictably.
+_GENRE_KEYWORD_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
+    ("hip-hop", ("hip hop", "hiphop", "rap", "trap")),
+    ("r&b", ("r&b", "r and b", "rnb", "soul")),
+    ("electronic", ("house", "edm", "electro", "techno", "trance", "dubstep", "dance", "big room")),
+    ("metal", ("metal",)),
+    ("rock", ("rock",)),
+    ("country", ("country",)),
+    ("reggae", ("reggae", "dancehall")),
+    ("latin", ("latin", "reggaeton", "salsa", "cumbia")),
+    ("folk", ("folk", "ludov", "heligonka")),
+    ("jazz", ("jazz",)),
+    ("classical", ("classical",)),
+    ("pop", ("pop",)),
+]
+
+_WHITESPACE_RUN = re.compile(r"[\s_]+")
+
+
 def canonicalize_genre(value: str | None) -> str:
     cleaned = _normalize_text(value, default="unknown").lower()
     if not cleaned:
         return "unknown"
-    cleaned = re.sub(r"[\s_]+", " ", cleaned)
+    cleaned = _WHITESPACE_RUN.sub(" ", cleaned)
 
-    exact_alias_map = {
-        "dance pop": "pop",
-        "electro pop": "pop",
-        "edm": "electronic",
-        "hip hop": "hip-hop",
-        "hiphop": "hip-hop",
-        "r and b": "r&b",
-        "rnb": "r&b",
-    }
-    if cleaned in exact_alias_map:
-        return exact_alias_map[cleaned]
+    alias = _GENRE_ALIASES.get(cleaned)
+    if alias is not None:
+        return alias
 
     # A label the grouping tree names explicitly keeps its own identity. The
     # keyword folding below is deliberately broad, so without this it would
@@ -112,28 +140,7 @@ def canonicalize_genre(value: str | None) -> str:
     if cleaned in _GENRE_TREE:
         return cleaned
 
-    # Real-world genre tags are highly fragmented (e.g. "australian rock",
-    # "classic rock", "album rock" are all just "rock"). Without folding
-    # these into broad families, genre similarity can't bridge related
-    # artists tagged with slightly different strings, and content-based
-    # recommendations end up isolated to a single artist's exact tag.
-    # Checked in order from most to least specific so compound genres
-    # (e.g. "hip hop soul") resolve predictably.
-    keyword_families: list[tuple[str, tuple[str, ...]]] = [
-        ("hip-hop", ("hip hop", "hiphop", "rap", "trap")),
-        ("r&b", ("r&b", "r and b", "rnb", "soul")),
-        ("electronic", ("house", "edm", "electro", "techno", "trance", "dubstep", "dance", "big room")),
-        ("metal", ("metal",)),
-        ("rock", ("rock",)),
-        ("country", ("country",)),
-        ("reggae", ("reggae", "dancehall")),
-        ("latin", ("latin", "reggaeton", "salsa", "cumbia")),
-        ("folk", ("folk", "ludov", "heligonka")),
-        ("jazz", ("jazz",)),
-        ("classical", ("classical",)),
-        ("pop", ("pop",)),
-    ]
-    for canonical, keywords in keyword_families:
+    for canonical, keywords in _GENRE_KEYWORD_FAMILIES:
         if any(keyword in cleaned for keyword in keywords):
             return canonical
 
@@ -597,6 +604,9 @@ class Catalog:
         return cached
 
     def to_dict(self) -> dict[str, Any]:
+        # `asdict()` would deep-copy recursively per track; TrackRecord is a
+        # flat slots dataclass, so a literal is equivalent and much cheaper
+        # over a run that rewrites the whole library on every BPM checkpoint.
         # "feature_space" is descriptive only since v2 -- similarity no longer
         # depends on a shared vector space, so these are kept for `summary`
         # and for a human reading the file, not consumed by scoring.
@@ -614,8 +624,24 @@ class Catalog:
                 "year_min": self.year_min,
                 "year_max": self.year_max,
             },
-            "tracks": [asdict(track) for track in self.tracks],
+            "tracks": [_track_to_dict(track) for track in self.tracks],
         }
+
+
+def _track_to_dict(track: TrackRecord) -> dict[str, Any]:
+    return {
+        "id": track.id,
+        "path": track.path,
+        "title": track.title,
+        "artist": track.artist,
+        "album": track.album,
+        "genre": track.genre,
+        "bpm": track.bpm,
+        "year": track.year,
+        "enabled": track.enabled,
+        "folder_id": track.folder_id,
+        "duration": track.duration,
+    }
 
 
 def _coerce_float(value: Any) -> float | None:

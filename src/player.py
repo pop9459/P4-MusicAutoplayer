@@ -115,11 +115,13 @@ class PlayerEngine:
             self.catalog.features_for(track).work_key
             for track in self.history[-self.queue_length :] + [self.current_track] + self.queue
         ]
+        # Built once and extended as picks land: rebuilding it from the full
+        # history and queue on every slot made a long top-up quadratic.
+        excluded_ids = {self.current_track.id}
+        excluded_ids.update(track.id for track in self.history)
+        excluded_ids.update(track.id for track in self.queue)
         while len(self.queue) < self.queue_length:
             reference_id = self.queue[-1].id if self.queue else self.current_track.id
-            excluded_ids = {self.current_track.id}
-            excluded_ids.update(track.id for track in self.history)
-            excluded_ids.update(track.id for track in self.queue)
             try:
                 next_track = recommend_next_track(
                     reference_id,
@@ -136,6 +138,7 @@ class PlayerEngine:
                 break
             with self._queue_lock:
                 self.queue.append(next_track)
+            excluded_ids.add(next_track.id)
             recent_artists.append(next_track.artist)
             recent_work_keys.append(self.catalog.features_for(next_track).work_key)
             yield next_track

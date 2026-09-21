@@ -254,6 +254,9 @@ def migrate_settings_to_library(settings: Settings, settings_path: Path) -> Libr
 
     folders: list[LibraryFolder] = []
     resolved_legacy = [(folder, str(folder.resolve())) for folder in legacy_folders]
+    # Captured before the sort below reorders it: this is settings.music_folders
+    # order, which the finished folder list is restored to for a stable display.
+    original_order = {resolved: index for index, (_, resolved) in enumerate(resolved_legacy)}
     # Longest path first so a nested folder wins over its parent when
     # matching a track's resolved path to a legacy folder.
     resolved_legacy.sort(key=lambda pair: len(pair[1]), reverse=True)
@@ -295,8 +298,10 @@ def migrate_settings_to_library(settings: Settings, settings_path: Path) -> Libr
                 track_count=track_count,
             )
         )
-    # Restore original settings.music_folders order for a stable display.
-    folders.sort(key=lambda f: [str(p.resolve()) for p in legacy_folders].index(f.path))
+    # Restore settings.music_folders order. The index map is built once, above:
+    # as a sort key this re-resolved every legacy folder -- a filesystem call --
+    # on every comparison.
+    folders.sort(key=lambda folder: original_order[folder.path])
 
     catalog = build_catalog(stamped_tracks)
     library = Library(version=LIBRARY_VERSION, folders=folders, catalog=catalog)

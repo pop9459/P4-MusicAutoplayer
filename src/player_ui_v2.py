@@ -149,9 +149,12 @@ class Player3Column:
         self._scan_task: ScanTask | None = None
         self._adding_folder = False
         self._search_mode = False
+        self._loaded_folder_id: str | None = None
 
         self._bpm_task: BpmTask | None = None
         self._bpm_applied_since_save = 0
+        # Invalidated wherever self.library is replaced (see _tracks_by_id).
+        self._tracks_by_id_cache: dict[str, TrackRecord] | None = None
 
         self._queue_task: QueueTask | None = None
         self._queue_task_last_revealed = -1
@@ -183,10 +186,7 @@ class Player3Column:
 
         # Init folder panel
         self.folder_panel.load_from_library(library)
-        if self.folder_panel.selected_entry:
-            self.songs_panel.load_songs_from_library(
-                self.library, self.folder_panel.selected_entry
-            )
+        self._load_selected_folder_songs(force=True)
 
     @property
     def catalog(self) -> Catalog:
@@ -463,16 +463,10 @@ class Player3Column:
 
         if key == curses.KEY_DOWN or key == ord("j"):
             self.folder_panel.next_folder()
-            if self.folder_panel.selected_entry:
-                self.songs_panel.load_songs_from_library(
-                    self.library, self.folder_panel.selected_entry
-                )
+            self._load_selected_folder_songs()
         elif key == curses.KEY_UP or key == ord("k"):
             self.folder_panel.previous_folder()
-            if self.folder_panel.selected_entry:
-                self.songs_panel.load_songs_from_library(
-                    self.library, self.folder_panel.selected_entry
-                )
+            self._load_selected_folder_songs()
         elif key == ord("\t"):
             self.active_column = 1
         elif key == ord("\n"):
@@ -504,6 +498,20 @@ class Player3Column:
             self.songs_panel.cycle_sort()
 
         return True
+
+    def _load_selected_folder_songs(self, *, force: bool = False) -> None:
+        """Load the selected folder's songs, skipping the work if it is already
+        loaded. Each load re-filters and re-sorts the whole catalog, which a
+        held-down j/k over "All Tracks" would otherwise redo on every keypress.
+        `force` is for when the library itself changed under an unchanged
+        selection (a scan finished, settings reloaded it)."""
+        entry = self.folder_panel.selected_entry
+        if entry is None:
+            return
+        if not force and entry.id == self._loaded_folder_id:
+            return
+        self._loaded_folder_id = entry.id
+        self.songs_panel.load_songs_from_library(self.library, entry)
 
     def _enter_settings_mode(self) -> None:
         """Open the settings screen, loading a fresh editable copy of settings."""
@@ -588,7 +596,7 @@ class Player3Column:
         """
         if not results:
             return
-        tracks_by_id = {track.id: track for track in self.library.catalog.tracks}
+        tracks_by_id = self._tracks_by_id()
         for track_id, bpm in results.items():
             track = tracks_by_id.get(track_id)
             if track is None:
@@ -596,6 +604,17 @@ class Player3Column:
             track.bpm = bpm
             self.library.catalog.track_features.pop(track_id, None)
         self._bpm_applied_since_save += len(results)
+
+    def _tracks_by_id(self) -> dict[str, TrackRecord]:
+        """Whole-catalog id lookup, cached until the library is replaced.
+
+        `_poll_bpm_task` runs every 200 ms for the length of a tempo run, and
+        rebuilding this per tick meant walking the entire catalog to apply a
+        handful of results.
+        """
+        if self._tracks_by_id_cache is None:
+            self._tracks_by_id_cache = {track.id: track for track in self.library.catalog.tracks}
+        return self._tracks_by_id_cache
 
     def _save_bpm_results(self) -> None:
         self._bpm_applied_since_save = 0
@@ -670,6 +689,7 @@ class Player3Column:
 
         new_library, folder, was_added = task.result[0]
         self.library = new_library
+        self._tracks_by_id_cache = None
         try:
             save_library(self.library, self.settings.library_path)
         except OSError as error:
@@ -680,10 +700,7 @@ class Player3Column:
             if entry.id == folder.id:
                 self.folder_panel.select_folder(index)
                 break
-        if self.folder_panel.selected_entry:
-            self.songs_panel.load_songs_from_library(
-                self.library, self.folder_panel.selected_entry
-            )
+        self._load_selected_folder_songs(force=True)
         message = (
             f"Added {folder.display_name} ({folder.track_count} tracks)."
             if was_added
@@ -712,14 +729,12 @@ class Player3Column:
         if library_changed:
             try:
                 self.library = load_library(self.settings.library_path)
+                self._tracks_by_id_cache = None
             except (OSError, ValueError) as error:
                 self.settings_panel.status_message = f"Library reload failed: {error}"
 
         self.folder_panel.load_from_library(self.library)
-        if self.folder_panel.selected_entry:
-            self.songs_panel.load_songs_from_library(
-                self.library, self.folder_panel.selected_entry
-            )
+        self._load_selected_folder_songs(force=True)
 
         if self.engine is not None:
             self._init_engine_with_song(self.engine.current_track)
@@ -728,11 +743,19 @@ class Player3Column:
         self.mode = "player"
 
     def _refresh_progress(self) -> None:
-        """Poll the backend for the current playback position/duration."""
-        if self.engine:
-            self.player_bar.update_progress(
-                self.backend.get_time_pos(), self.backend.get_duration()
-            )
+        """Poll the backend for the current playback position/duration.
+
+        Duration cannot change within a track, so it is queried only until it
+        is known and then reused -- one fewer synchronous IPC round trip per
+        200 ms tick for the whole of playback. `PlayerBar.update_track` resets
+        it to None on every track change, which is what re-arms the query.
+        """
+        if not self.engine:
+            return
+        duration = self.player_bar.duration
+        if duration is None:
+            duration = self.backend.get_duration()
+        self.player_bar.update_progress(self.backend.get_time_pos(), duration)
 
     def handle_input(self, key: int) -> bool:
         """Dispatch key to the search box if it's open, to the settings
