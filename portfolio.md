@@ -972,12 +972,6 @@ One thing I still feel is true is that an initial design is never fully reflecte
 final product. This is why I always take it with a grain of salt and come back to the
 design later during implementation, when I see that something needs to be adjusted.
 
-I should separate two things here, because they went differently. The engineering design —
-the design document, the reasoning behind the decisions — I did up front, and that is the
-part that worked. The Design Thinking research steps I did afterwards, once the product
-already existed. That is the wrong way round, and it shows: the interviews in week 4.1 still
-produced findings, but none of them could change anything by the time I had them.
-
 #### What I learned about AI
 
 I noticed that AI usage in programming is only increasing, and while there are still many
