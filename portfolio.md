@@ -477,12 +477,12 @@ The weights sum to 1.0, but they are never all used at once unless both tracks c
 four signals. Each term is computed independently and returns `None` when either side lacks
 the data:
 
-| Term   | How it is computed                                                                                                               | Returns `None` when      |
-| ------ | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------ | ------ | ----------------------- |
-| genre  | graded by the grouping tree: same label 1.0 > same subfamily 0.6 > same family 0.3 > a small table of cross-family bridges > 0.0 | either side is untagged  |
-| bpm    | `exp(-d / 0.12)` where `d` is the wrapped log2 tempo ratio, so 87 and 174 BPM match                                              | either side has no tempo |
-| artist | Jaccard overlap between the two sets of credited artists                                                                         | either side is untagged  |
-| year   | `exp(-                                                                                                                           | Δyear                    | / 12)` | either side has no year |
+| Term | How it is computed | Returns `None` when |
+| --- | --- | --- |
+| genre | graded by the grouping tree: same label 1.0 > same subfamily 0.6 > same family 0.3 > a small table of cross-family bridges > 0.0 | either side is untagged |
+| bpm | `exp(-d / 0.12)`, where `d` is the wrapped log2 tempo ratio, so 87 and 174 BPM match | either side has no tempo |
+| artist | Jaccard overlap between the two sets of credited artists | either side is untagged |
+| year | `exp(-gap / 12)`, where `gap` is the absolute difference in years | either side has no year |
 
 The renormalization is what makes one weight table work on any library. If neither track
 has a tempo, genre/artist/year simply share the whole budget between them; the moment the
