@@ -947,53 +947,69 @@ boundary of what I own in this project, and I would rather state it than have it
 
 ### Self-reflection
 
-*Required by modulebook §5.*
+*Required three times over: modulebook §5 ("each member posts a self-reflection"), week 4.7
+Computer Science ("what have you learned about Design Thinking and AI?") and week 4.7
+Professional Skills ("what worked well? what would you do differently?").*
 
-**What went wrong first.** I did not do this assignment during the period. The reason is not
-interesting — I let a solo assignment with no fixed weekly deliverable slide behind the group
-project, which had people waiting on me — but the pattern is, because the 360° feedback from
-my teammates in Professional Skills says something adjacent: that I go along with what the
-group decides instead of pushing my own position. A solo assignment has no group to push
-against, and it turns out it also had nothing keeping me on it. The fix is not mysterious:
-solo work needs self-imposed deliverable dates, because nobody else will supply them.
+> **To write.** Prompts and factual hooks are below each heading; delete the quoted blocks
+> as you replace them with your own text. §5 says the portfolio must contain enough
+> reflection "to determine the extent to which the student has completed the assignments
+> independently" — given the AI-assistance disclosure above, this section is where that is
+> judged, so it has to be in your own voice.
 
-**What I actually learned about AI.** Three things, in order of how much they surprised me.
+#### What I learned about Design Thinking
 
-First, **the representation is the design decision.** I came in thinking the interesting
-choice was which similarity metric to use, and the real choice was how to represent a track
-at all. Everything that went wrong with the vector model — the untagged clique, year
-becoming recency, tempo not being circular — was a representation failure that the metric
-could not have fixed.
+> The honest answer is that I ran it backwards: built first, interviewed last. Worth saying
+> what that cost. Hooks you can use:
+>
+> - The interviews still produced findings — P1 cared about being *seen*, not tracked;
+>   nobody raised cold start; repetition and drift emerged as a fourth challenge — but none
+>   of it could change a product that already existed.
+> - Which step would have changed the most if done in order? (My guess: week 4.3's
+>   rejected-ideas list, which became the rule that settled later arguments.)
+> - Did any part of the chain feel like paperwork rather than design? Say so if it did.
 
-Second, **missing data is a first-class case, not an edge case.** 355 of 2,599 tracks have
-no usable genre. The textbook silently assumes complete features, and the entire difficulty
-of this project was in what to do when they are not.
+#### What I learned about AI
 
-Third, and this is the one I will carry: **you cannot argue your way to knowing whether a
-recommender is good.** For most of this project I had opinions about the weights and no way
-to test them. Building the blind A/B test was the point where the project stopped being a
-matter of taste. The moment that proved it was the tempo ablation: an objective, correctly
-computed offline metric told me confidently to make a change that a blind listening test then
-could not detect. If I had trusted the metric I would have shipped a change with no evidence
-behind it and felt rigorous doing it.
+> Pick the ones you actually felt, not the ones that sound good. Candidates:
+>
+> - The representation is the design decision, not the metric. Everything that broke —
+>   the untagged clique, year becoming recency, tempo not being circular — was a
+>   representation failure that no choice of similarity function would have fixed.
+> - Missing data is the normal case in a real library, not an edge case. 355 of 2,599
+>   tracks have no usable genre.
+> - "AI" in ordinary use now means a chatbot, and the systems that actually shape what
+>   people see daily are the ones nobody calls AI. You noticed this yourself when
+>   rewording the interview questions.
+> - You could not tell whether the recommender was good until you built something to
+>   measure it with.
 
-**What I would do differently.** Build the evaluation harness first, not last. Everything
-before it was guesswork, and some of it was guesswork I was confident about.
+#### What worked well
 
-And talk to people before building, not after. I did the interviews at the very end, and
-they still moved the analysis: the participant I expected to care least about data cared
-most, and about something I had not thought of (being seen, not being tracked), while the
-challenge I was most sure of — cold start — was raised by nobody. None of that changed the
-product, because the product already existed. That is the actual cost of doing Design
-Thinking out of order: the research still produces findings, it just cannot act on
-anything.
+> Hooks: 502 unit tests and what that made possible; the three-instrument measurement
+> setup; the decision to keep tempo at 0.25 against the ablation, backed by 10-6 with 8
+> ties at p=0.454; the blind A/B beating same-genre shuffle 10-2 at p=0.039, which is the
+> result that answers "is it any good?".
 
-**On the AI assistance.** Working this way made me fast and it made me shallow in places.
-The defence against shallowness turned out to be measurement rather than discipline: it does
-not matter how the code was written if a blind test says the output is preferred 10-2 over a
-serious control. But it does matter that I can explain the decisions, and the honest version
-is the one in the section above — I own the design and the evaluation, and I do not own every
-line.
+#### What I would do differently
+
+> Hooks: build the evaluation harness first — everything before it was guesswork, some of
+> it confident guesswork. Talk to people before building. Do the week 4.4 test with a
+> second person, since their library would have had different tag quality. And the one
+> that matters most: this was delivered late because a solo assignment with no weekly
+> deliverable slid behind the group project. Say what you would put in place instead.
+> (Note the 360° feedback in the Professional Skills portfolio says something adjacent —
+> that you go along with what the group decides rather than pushing your own position. A
+> solo assignment has no group to push against, and also nothing keeping you on it.)
+
+#### Working with AI assistance
+
+> The disclosure above states the split. This is the part where you say what it cost and
+> what you would do differently next time. Hooks: it made you fast and shallow in places;
+> the defence against shallowness turned out to be measurement rather than discipline —
+> it matters less how the code was written if a blind test says the output is preferred
+> 10-2 over a serious control. But you still have to be able to explain the decisions,
+> and the honest line is that you own the design and the evaluation, not every line.
 
 ### Notes on the week's assignments
 
