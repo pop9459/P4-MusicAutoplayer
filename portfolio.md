@@ -528,7 +528,8 @@ the tree so they stay isolated rather than being pulled toward anything.
 #### Queue assembly: filters on top of ranking
 
 Ranking by similarity, taking the top k and sampling from it — the whole of the original
-design — is **not sufficient**, for reasons the peer test in week 4.4 found immediately.
+design — is **not sufficient**, for reasons the prototype testing in week 4.4 found
+immediately.
 Two filters sit between ranking and selection. Both are _queue-assembly_ filters, not
 scoring changes, and both fall back to the unfiltered pool rather than ever stalling
 playback — a single-artist library must still play.
